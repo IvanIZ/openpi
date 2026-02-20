@@ -1,3 +1,7 @@
+"""
+NOTE: Many changes from https://github.com/BrunoFANG1/openpi_subtask_generation/blob/main/src/openpi/models/pi05.py
+For implementing subtask inference
+"""
 import logging
 
 import einops
@@ -42,6 +46,31 @@ def make_attn_mask(input_mask, mask_ar):
     attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
     valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
     return jnp.logical_and(attn_mask, valid_mask)
+
+# Is this needed?
+@jax.vmap
+def left_to_right_align(x, input_mask, attn_mask):
+    """Converts input from left-align to right-aligned."""
+    # Due to vmap, this is operating in a single example (not batch level).
+    assert x.ndim == 2
+    assert input_mask.ndim == 1
+    assert attn_mask.ndim == 2
+    assert x.shape[0] == input_mask.shape[0]
+    assert attn_mask.shape[0] == attn_mask.shape[1], attn_mask.shape
+    seqlen = jnp.max(input_mask * jnp.arange(input_mask.shape[0])) + 1
+    x = jnp.roll(x, -seqlen, axis=0)
+    input_mask = jnp.roll(input_mask, -seqlen, axis=0)
+    attn_mask = jnp.roll(attn_mask, -seqlen, axis=(0, 1))
+    return x, input_mask, attn_mask
+
+
+def put_along_last_axis(arr, indices, values):
+    """Like np.put_along_axis(..., axis=-1), since jax is missing it."""
+    assert arr.ndim == indices.ndim == values.ndim, (arr.ndim, indices.ndim, values.ndim)
+    onehot = jax.nn.one_hot(indices, arr.shape[-1], dtype=values.dtype)
+    put_mask = jnp.einsum("...i,...in->...n", jnp.ones(values.shape, jnp.int32), onehot)
+    put_values = jnp.einsum("...i,...in->...n", values, onehot)
+    return jnp.where(put_mask, put_values, arr)
 
 
 @at.typecheck
@@ -130,7 +159,9 @@ class Pi0(_model.BaseModel):
             tokens.append(tokenized_inputs)
             input_mask.append(obs.tokenized_prompt_mask)
             # full attention between image and language inputs
-            ar_mask += [False] * tokenized_inputs.shape[1]
+            #ar_mask += [False] * tokenized_inputs.shape[1]
+            # subtask_generation repo has this set as True
+            ar_mask += [True] * tokenized_inputs.shape[1]
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -213,6 +244,111 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
+
+    def sample_low_level_task(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        max_decoding_steps: int = 20,
+        PALIGEMMA_EOS_TOKEN: int = 1,
+        temperature: float = 0.0,
+    ):
+
+        batch_size = observation.tokenized_prompt.shape[0]
+        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+
+        # left to right align all input token sequences
+        prefix_token_embeddings, prefix_mask, prefix_attn_mask = left_to_right_align(
+            prefix_token_embeddings, prefix_mask, prefix_attn_mask
+        )
+        prefill_size = prefix_token_embeddings.shape[1]
+        prefill_len = jnp.sum(prefix_mask, axis=-1)
+        prefix_start = prefill_size - prefill_len
+
+        prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
+        prefix_positions = jnp.cumsum(prefix_mask, axis=-1) - 1
+        # import pdb; pdb.set_trace()
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_token_embeddings, None], mask=prefix_attn_mask, positions=prefix_positions, adarms_cond=[None, None]
+        )
+        last_token_embedding = prefix_out[:, -1:]
+        last_logits = self.PaliGemma.llm(last_token_embedding, method="deembed")
+        last_logits = jax.nn.log_softmax(last_logits, axis=-1)
+
+        rng, rng_step = jax.random.split(rng)
+        token = jax.lax.cond(
+            temperature > 0.0,
+            lambda _: jax.random.categorical(rng_step, last_logits / temperature, axis=-1),
+            lambda _: jnp.argmax(last_logits, axis=-1),
+            operand=None,
+        )
+        output_tokens = jnp.zeros((batch_size, max_decoding_steps), dtype=int)
+        #output_tokens = put_along_last_axis(output_tokens, jnp.broadcast_to(0, (batch_size, 1)), token)
+        #print(prefix_token_embeddings.shape, kv_cache[0].shape, kv_cache[1].shape, kv_cache[2].shape)
+
+        def step(carry):
+            rng, last_logit, output_tokens, cache, _, step = carry
+
+            # Sample token from last logit
+            # Split RNG for this step
+            rng, rng_step = jax.random.split(rng)
+            token = jax.lax.cond(
+                temperature > 0.0,
+                lambda _: jax.random.categorical(rng_step, last_logit / temperature, axis=-1),
+                lambda _: jnp.argmax(last_logit, axis=-1),
+                operand=None,
+            )
+            output_tokens = put_along_last_axis(output_tokens, jnp.broadcast_to(step, (batch_size, 1)), token)
+
+            # Check for early stopping --> stop if all batch elements have EOS token
+            ### TODO: erase extra decoded token due to mismatch
+            has_eos = jnp.any(token == PALIGEMMA_EOS_TOKEN, axis=-1)
+            all_eos = jnp.all(has_eos)
+
+            # Decode one step
+            token_embedding =  self.PaliGemma.llm(token, method="embed")
+            positions = prefill_len[:, None] + step
+
+			# This seems wrong. It seems to produce a "flat" attention mask instead of an autoregressive one
+			# But I guess we don't care, we only care about the last embedding being correct
+			# Does this run efficiently? Naively the implementation would take a lot more compute, but maybe its
+            #   handled by jax...
+            mask = jnp.logical_and(
+                jnp.arange(prefill_size + max_decoding_steps)[None, None, :] >= prefix_start[:, None, None],
+                jnp.arange(prefill_size + max_decoding_steps)[None, None, :]
+                < (jnp.broadcast_to(prefill_size + step + 1, (prefix_start.shape[0], 1, 1))),
+            )
+            #print(mask.shape)
+
+            (prefix_out, _), kv_cache = self.PaliGemma.llm(
+                [token_embedding, None], mask=mask, positions=positions, adarms_cond=[None, None], kv_cache=cache
+            )
+            last_token_embedding = prefix_out[:, -1:]
+            last_logits = self.PaliGemma.llm(last_token_embedding, method="deembed")
+            last_logits = jax.nn.log_softmax(last_logits, axis=-1)
+
+            return rng, last_logits, output_tokens, kv_cache, all_eos, step + 1
+
+        def cond(carry):
+            _, _, _, _, all_eos, step = carry
+            return (~all_eos) & (step < max_decoding_steps)
+
+        #return output_tokens, kv_cache, prefix_mask, prefix_ar_mask
+
+        # Use lax.while_loop so we can jit the full decoding loop.
+        _, _, output_tokens, kv_cache, _, _ = jax.lax.while_loop(
+            cond, step, (rng, last_logits, output_tokens, kv_cache, False, 0)
+        )
+        mask = jnp.concatenate([prefix_mask, (output_tokens!=0).astype(jnp.bool_)], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(max_decoding_steps, dtype=jnp.bool_)], axis=0)
+        # NOTE:
+        #  output_tokens [B, max_decoding_steps]
+        #  kv_cache [B, prefix_len+max_decoding_steps, ...]
+        #  mask [B, prefix_len+max_decoding_steps]
+        #  ar_mask [prefix_len+max_decoding_steps]
+        return output_tokens, kv_cache, mask, ar_mask
+
     @override
     def sample_actions(
         self,
@@ -227,14 +363,12 @@ class Pi0(_model.BaseModel):
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
+		# TODO: Can cause issues since subtask lengths are different, leading to more tokens past EOS if batch size is not 1.
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        output_tokens, kv_cache, prefix_mask, prefix_ar_mask = self.sample_low_level_task(rng, observation, max_decoding_steps=20, temperature=0.0)
 
         def step(carry):
             x_t, time = carry
@@ -250,17 +384,19 @@ class Pi0(_model.BaseModel):
             # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
             # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+            query_attn_mask = full_attn_mask[:, -suffix_tokens.shape[1]:, :] # [B, suffix_len, prefix_len+suffix_len]
+
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+                prefix_mask.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
-                mask=full_attn_mask,
+                mask=query_attn_mask,
                 positions=positions,
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
@@ -276,4 +412,4 @@ class Pi0(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        return (x_0, output_tokens)

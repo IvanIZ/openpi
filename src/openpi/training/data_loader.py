@@ -137,6 +137,10 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    if isinstance(data_config, _config.LiberoReasonDataConfig):
+        from openpi.policies.libero_reason_dataset import LiberoReasonDataset
+        return LiberoReasonDataset(data_config, action_horizon)
+
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
@@ -531,10 +535,14 @@ class DataLoaderImpl(DataLoader):
     def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
         self._data_config = data_config
         self._data_loader = data_loader
+        self._use_fuse_observation = isinstance(data_config, _config.LiberoReasonDataConfig)
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
     def __iter__(self):
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            if self._use_fuse_observation or "diffusion_loss_mask" in batch:
+                yield _model.FuseObservation.from_dict(batch), batch["actions"]
+            else:
+                yield _model.Observation.from_dict(batch), batch["actions"]

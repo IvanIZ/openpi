@@ -61,6 +61,7 @@ def create_trained_policy(
         # that the policy is using the same normalization stats as the original training process.
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
+        # checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")      # hardcoded assets path for norm stats NOTE only for running base weights on libero
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
 
     # Determine the device to use for PyTorch models

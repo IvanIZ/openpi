@@ -25,7 +25,8 @@ class PaligemmaTokenizer:
             # This is the Pi05 format, where the state is part of the discrete language input.
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
             state_str = " ".join(map(str, discretized_state))
-            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            #full_prompt = f"Task: {cleaned_text}, State: {state_str}; \nAction: "
+            full_prompt = f"Task: {cleaned_text}. Subtask: "
             tokens = self._tokenizer.encode(full_prompt, add_bos=True)
         else:
             # This is the Pi0 format, where the state is part of the continuous action expert input.
@@ -46,6 +47,103 @@ class PaligemmaTokenizer:
             mask = [True] * self._max_len
 
         return np.asarray(tokens), np.asarray(mask)
+
+
+END_OF_PREFIX_TOKEN = 257022
+BEGIN_OF_ACTION = 257021
+BEGIN_OF_REASONING = 257020
+PALIGEMMA_EOS_TOKEN = 1
+
+
+class FusePaligemmaTokenizer:
+    """Tokenizer for models with joint text reasoning and action generation.
+
+    Handles the special token protocol:
+    - Text prefix (instruction + reasoning context) uses bidirectional attention
+    - Text suffix (reasoning output) uses causal attention
+    - Special tokens mark transitions between prefix, reasoning, and action modes
+    """
+
+    def __init__(self, max_len: int = 415):
+        self._max_len = max_len
+
+        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        with path.open("rb") as f:
+            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+
+    def tokenize(
+        self,
+        thought: list[str],
+        act_with_outdated_thought: bool,
+        think_with_outdated_thought: bool,
+        state: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        prefix = thought[0]
+        if state is not None:
+            discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            state_str = " ".join(map(str, discretized_state))
+            prefix = f"{prefix}; State: {state_str}"
+
+        prefix_tokens = (
+            self._tokenizer.encode(prefix, add_bos=True) +
+            [END_OF_PREFIX_TOKEN]
+        )
+
+        if len(thought) > 1:
+            suffix = thought[1]
+            suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=True)
+            diffusion_loss_mask = np.False_
+        else:
+            suffix_tokens = [BEGIN_OF_ACTION]
+            diffusion_loss_mask = np.True_
+
+        tokens = prefix_tokens + suffix_tokens
+        token_mask = [True] * len(tokens)
+        ar_mask = [0] * len(prefix_tokens) + [1] * len(suffix_tokens)
+
+        if think_with_outdated_thought:
+            text_loss_mask = [False] * len(prefix_tokens) + [True] + [False] * (len(suffix_tokens) - 1)
+        else:
+            text_loss_mask = (
+                [False] * len(prefix_tokens) +
+                [not act_with_outdated_thought] +
+                [True] * (len(suffix_tokens) - 1)
+            )
+
+        tokens_len = len(tokens)
+        if tokens_len < self._max_len:
+            padding = [False] * (self._max_len - tokens_len)
+            tokens = tokens + padding
+            token_mask = token_mask + padding
+            ar_mask = ar_mask + padding
+            text_loss_mask = text_loss_mask + padding
+        else:
+            if len(tokens) > self._max_len:
+                logging.warning(
+                    f"Token length ({len(tokens)}) exceeds max length ({self._max_len}), truncating. "
+                    "Consider increasing the `max_token_len` in your model config if this happens frequently."
+                )
+            tokens = tokens[: self._max_len]
+            token_mask = token_mask[: self._max_len]
+            ar_mask = ar_mask[: self._max_len]
+            text_loss_mask = text_loss_mask[: self._max_len]
+
+        return (
+            np.asarray(tokens),
+            np.asarray(token_mask),
+            np.asarray(ar_mask),
+            np.asarray(text_loss_mask),
+            diffusion_loss_mask,
+        )
+
+    def extract_thoughts(self, tokens: np.ndarray) -> str:
+        tokens = tokens.tolist()
+        filtered_tokens = []
+        for t in tokens[1:]:
+            filtered_tokens.append(t)
+            if t == PALIGEMMA_EOS_TOKEN:
+                break
+        return self._tokenizer.decode(filtered_tokens)
 
 
 class FASTTokenizer:

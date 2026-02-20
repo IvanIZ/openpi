@@ -84,6 +84,47 @@ class LiberoInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class LiberoReasonInputs(transforms.DataTransformFn):
+    """Converts inputs for Pi0Fuse reasoning model. Handles thought field."""
+
+    model_type: _model.ModelType = _model.ModelType.PI0_FUSE
+
+    def __call__(self, data: dict) -> dict:
+        base_image = _parse_image(data.get("image_1", data.get("observation/image")))
+        wrist_image_key = "image_wrist_1" if "image_wrist_1" in data else "observation/wrist_image"
+        if wrist_image_key in data:
+            wrist_image = _parse_image(data[wrist_image_key])
+        else:
+            wrist_image = np.zeros_like(base_image)
+
+        inputs = {
+            "state": data["state"],
+            "image": {
+                "base_0_rgb": base_image,
+                "left_wrist_0_rgb": wrist_image,
+                "right_wrist_0_rgb": np.zeros_like(base_image),
+            },
+            "image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.True_,
+                "right_wrist_0_rgb": np.False_,
+            },
+        }
+
+        if "actions" in data:
+            inputs["actions"] = data["actions"]
+
+        if "thought" in data:
+            inputs["thought"] = data["thought"]
+            inputs["act_with_outdated_thought"] = data.get("act_with_outdated_thought", False)
+            inputs["think_with_outdated_thought"] = data.get("think_with_outdated_thought", False)
+        elif "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
 class LiberoOutputs(transforms.DataTransformFn):
     """
     This class is used to convert outputs from the model back the the dataset specific format. It is
@@ -97,4 +138,4 @@ class LiberoOutputs(transforms.DataTransformFn):
         # dimension, we need to now parse out the correct number of actions in the return dict.
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        return {"actions": np.asarray(data["actions"][:, :7]), "subtask": data["subtask"]}

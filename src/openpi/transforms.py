@@ -267,6 +267,51 @@ class TokenizePrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class FuseTokenizePrompt(DataTransformFn):
+    """Tokenizes thought (prefix + suffix) for Pi0Fuse reasoning models."""
+    tokenizer: _tokenizer.FusePaligemmaTokenizer
+    discrete_state_input: bool = False
+
+    def __call__(self, data: DataDict) -> DataDict:
+        _ = data.pop("prompt", None)
+        thought = data.pop("thought", None)
+
+        if thought is None:
+            raise ValueError("Thought is required for FuseTokenizePrompt")
+
+        state = None
+        if self.discrete_state_input:
+            state = data.get("state", None)
+            if state is None:
+                raise ValueError("State is required for discrete state input.")
+
+        (
+            tokens,
+            token_mask,
+            ar_mask,
+            text_loss_mask,
+            diffusion_loss_mask,
+        ) = self.tokenizer.tokenize(
+            thought,
+            data.get('act_with_outdated_thought', False),
+            data.get('think_with_outdated_thought', False),
+            state=state,
+        )
+
+        data.pop('act_with_outdated_thought', None)
+        data.pop('think_with_outdated_thought', None)
+
+        return {
+            **data,
+            "tokenized_prompt": tokens,
+            "tokenized_prompt_mask": token_mask,
+            "token_ar_mask": ar_mask,
+            "token_loss_mask": text_loss_mask,
+            "diffusion_loss_mask": diffusion_loss_mask,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizeFASTInputs(DataTransformFn):
     tokenizer: _tokenizer.FASTTokenizer
 

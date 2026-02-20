@@ -15,6 +15,7 @@ from typing_extensions import override
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
+from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
 
@@ -55,6 +56,9 @@ class Policy(BasePolicy):
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
 
+        self._tokenizer = _tokenizer.PaligemmaTokenizer(max_len=50)
+        self._is_fuse_model = False
+
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
             self._model.eval()
@@ -63,6 +67,11 @@ class Policy(BasePolicy):
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
+            if hasattr(model, 'prefill'):
+                self._is_fuse_model = True
+                self._prefill = nnx_utils.module_jit(model.prefill)
+                self._reason = nnx_utils.module_jit(model.reason)
+
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -87,18 +96,47 @@ class Policy(BasePolicy):
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
-        observation = _model.Observation.from_dict(inputs)
+        if "diffusion_loss_mask" in inputs:
+            observation = _model.FuseObservation.from_dict(inputs)
+        else:
+            observation = _model.Observation.from_dict(inputs)
+
+        subtask = None
+
+        if self._is_fuse_model:
+            prefill_rng, reason_rng, action_rng = jax.random.split(sample_rng_or_pytorch_device, 3)
+            _, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = \
+                self._prefill(prefill_rng, observation)
+            reasoning_tokens = self._reason(
+                reason_rng, eop_logit, kv_cache, prefix_mask, prefix_positions
+            )
+            raw = np.asarray(reasoning_tokens[0]).tolist()
+            filtered = []
+            for t in raw[1:]:
+                filtered.append(t)
+                if t == 1:
+                    break
+            subtask = self._tokenizer._tokenizer.decode(filtered)
+            all_actions = self._sample_actions(action_rng, observation, **sample_kwargs)
+        else:
+            all_actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+
+        if isinstance(all_actions, tuple):
+            actions, second = all_actions
+            outputs = {"state": inputs["state"], "actions": actions}
+            if subtask is None and not isinstance(second, dict):
+                subtask = self._tokenizer._tokenizer.decode(second[second != 0].tolist())
+        else:
+            outputs = {"state": inputs["state"], "actions": all_actions}
+
         start_time = time.monotonic()
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
-        }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
+        outputs['subtask'] = subtask
         outputs = self._output_transform(outputs)
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
