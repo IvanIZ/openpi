@@ -372,15 +372,11 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 @dataclasses.dataclass(frozen=True)
 class LiberoReasonDataConfig(DataConfig):
     """Extended data config for LIBERO with reasoning annotations."""
-    local_files_only: bool = True
-    state_down_sample_steps: list[int] = dataclasses.field(default_factory=list)
-    image_down_sample_steps: list[int] = dataclasses.field(default_factory=list)
     action_down_sample_steps: int = 1
     getitem_type: str = "necessary"
     use_reasoning: bool = True
     use_wrist_image: bool = True
     use_history: bool = False
-    use_reference_image: bool = False
     use_outdated_reasoning: bool = True
     is_computing_norm_stats: bool = False
     reasoning_json_path: str | None = None
@@ -395,10 +391,12 @@ class LiberoReasonDataConfig(DataConfig):
 class LeRobotLiberoReasonDataConfig(DataConfigFactory):
     """Data config factory for LIBERO with reasoning annotations (for Pi0Fuse)."""
 
-    base_config: tyro.conf.Suppress[LiberoReasonDataConfig | DataConfig | None] = None
+    #base_config: tyro.conf.Suppress[LiberoReasonDataConfig | DataConfig | None] = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # No repack transform: LiberoReasonDataset outputs things
+        # in pi0 format already, not LeRobot format. Maybe this should not be the case
         data_transforms = _transforms.Group(
             inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
@@ -1062,7 +1060,6 @@ _CONFIGS = [
         data=LeRobotLiberoReasonDataConfig(
             repo_id="yilin-wu/libero-100",
             base_config=LiberoReasonDataConfig(
-                local_files_only=True,
                 prompt_from_task=False,
                 use_reasoning=True,
                 use_wrist_image=True,
@@ -1108,7 +1105,6 @@ _CONFIGS = [
         data=LeRobotLiberoReasonDataConfig(
             repo_id="yilin-wu/libero-10",
             base_config=LiberoReasonDataConfig(
-                local_files_only=True,
                 prompt_from_task=False,
                 use_reasoning=True,
                 use_wrist_image=True,

@@ -21,116 +21,12 @@ import openpi.models.tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 
+from openpi.models.pi0 import make_attn_mask, posemb_sincos, put_along_last_axis
+from openpi.models.pi0_fuse_config import Pi0FuseConfig
+
 logger = logging.getLogger("openpi")
 
 PALIGEMMA_EOS_TOKEN = 1
-
-
-def make_attn_mask(input_mask, mask_ar):
-    """Adapted from big_vision. See pi0.py for full docstring."""
-    mask_ar = jnp.broadcast_to(mask_ar, input_mask.shape)
-    cumsum = jnp.cumsum(mask_ar, axis=1)
-    attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
-    valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
-    return jnp.logical_and(attn_mask, valid_mask)
-
-
-@at.typecheck
-def posemb_sincos(
-    pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
-) -> at.Float[at.Array, "b {embedding_dim}"]:
-    if embedding_dim % 2 != 0:
-        raise ValueError(f"embedding_dim ({embedding_dim}) must be divisible by 2")
-    fraction = jnp.linspace(0.0, 1.0, embedding_dim // 2)
-    period = min_period * (max_period / min_period) ** fraction
-    sinusoid_input = jnp.einsum(
-        "i,j->ij", pos, 1.0 / period * 2 * jnp.pi,
-        precision=jax.lax.Precision.HIGHEST,
-    )
-    return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
-
-
-def put_along_last_axis(arr, indices, values):
-    assert arr.ndim == indices.ndim == values.ndim, (arr.ndim, indices.ndim, values.ndim)
-    onehot = jax.nn.one_hot(indices, arr.shape[-1], dtype=values.dtype)
-    put_mask = jnp.einsum("...i,...in->...n", jnp.ones(values.shape, jnp.int32), onehot)
-    put_values = jnp.einsum("...i,...in->...n", values, onehot)
-    return jnp.where(put_mask, put_values, arr)
-
-
-@dataclasses.dataclass(frozen=True)
-class Pi0FuseConfig(_model.BaseModelConfig):
-    """Config for Pi0Fuse model (pi05-compatible with reasoning loss)."""
-    dtype: str = "bfloat16"
-    paligemma_variant: _gemma.Variant = "gemma_2b"
-    action_expert_variant: _gemma.Variant = "gemma_300m"
-
-    action_dim: int = 32
-    action_horizon: int = 16
-    max_token_len: int = 415
-
-    # L = L_text + diffusion_loss_coeff * L_diffusion
-    diffusion_loss_coeff: float = 1.0
-
-    # Pi05 uses AdaRMSNorm in action expert and discretized state in text
-    pi05: bool = True
-
-    @property
-    @override
-    def model_type(self) -> _model.ModelType:
-        return _model.ModelType.PI0_FUSE
-
-    @override
-    def create(self, rng: at.KeyArrayLike) -> "Pi0Fuse":
-        return Pi0Fuse(self, rngs=nnx.Rngs(rng))
-
-    @override
-    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.FuseObservation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
-
-        with at.disable_typechecking():
-            observation_spec = _model.FuseObservation(
-                images={
-                    "base_0_rgb": image_spec,
-                    "left_wrist_0_rgb": image_spec,
-                    "right_wrist_0_rgb": image_spec,
-                },
-                image_masks={
-                    "base_0_rgb": image_mask_spec,
-                    "left_wrist_0_rgb": image_mask_spec,
-                    "right_wrist_0_rgb": image_mask_spec,
-                },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
-                tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
-                token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
-                diffusion_loss_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_),
-            )
-        action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
-        return observation_spec, action_spec
-
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
-        filters = []
-        has_lora = False
-        gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
-        action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
-        if "lora" in self.paligemma_variant:
-            filters.append(gemma_params_filter)
-            if "lora" not in self.action_expert_variant:
-                filters.append(nnx.Not(action_expert_params_filter))
-            has_lora = True
-        elif "lora" in self.action_expert_variant:
-            filters.append(action_expert_params_filter)
-            has_lora = True
-
-        if has_lora:
-            filters.append(nnx.Not(nnx_utils.PathRegex(".*lora.*")))
-        if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
-
 
 class Pi0Fuse(_model.BaseModel):
     """Pi05-compatible model with joint text reasoning loss and action diffusion loss.

@@ -98,7 +98,7 @@ class LiberoReasonInputs(transforms.DataTransformFn):
             wrist_image = np.zeros_like(base_image)
 
         inputs = {
-            "state": data["state"],
+            "state": data["observation/state"],
             "image": {
                 "base_0_rgb": base_image,
                 "left_wrist_0_rgb": wrist_image,
