@@ -219,14 +219,10 @@ Smaller config for testing on LIBERO-10 (10 tasks, ~10x less data):
 source /path/to/mujoco_playground/.venv/bin/activate
 
 # For LIBERO-100 (full training):
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train.py pi05_libero_reason_lora \
-  --exp-name=pi05_libero_reason_lora \
-  --reasoning_json_path /path/to/cot_simple.json
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train.py pi05_libero_reason_lora --exp-name=pi05_libero_reason_lora
 
 # For LIBERO-10 (testing):
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train.py pi05_libero_10_reason_lora \
-  --exp-name=pi05_libero_10_reason_lora \
-  --reasoning_json_path /path/to/cot_simple.json
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train.py pi05_libero_10_reason_lora --exp-name=pi05_libero_10_reason_lora
 ```
 
 ---
@@ -352,14 +348,6 @@ Loss trend: 13.6481 -> 13.6248 -> 13.5793
 
 ## Memory Considerations
 
-On a single A100 80GB:
-
-| Component | Approximate Memory |
-|-----------|-------------------|
-| Pi05 base model (bfloat16) | ~6 GB |
-| LoRA adapters | ~100 MB |
-| Optimizer states (LoRA only) | ~200 MB |
-| Activations (batch=4) | ~20-30 GB |
-| **Total** | ~30-40 GB |
+On a single A100 80GB: so far tested max batch size: 16
 
 LoRA finetuning comfortably fits on a single A100 80GB. For full finetuning, memory would be significantly higher (~70+ GB).
