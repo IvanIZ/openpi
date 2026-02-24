@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 import logging
 import pathlib
+import re
 import time
 from typing import Any, TypeAlias
 
@@ -71,6 +72,30 @@ class Policy(BasePolicy):
                 self._is_fuse_model = True
                 self._prefill = nnx_utils.module_jit(model.prefill)
                 self._reason = nnx_utils.module_jit(model.reason)
+                self._act = nnx_utils.module_jit(model.act)
+
+    def _decode_reasoning_tokens(self, raw_tokens: list[int]) -> str | None:
+        """Decode generated reasoning tokens while removing protocol/control tokens."""
+        kept_tokens: list[int] = []
+        for token in raw_tokens[1:]:
+            if token == _tokenizer.PALIGEMMA_EOS_TOKEN:
+                break
+            if token in {
+                0,
+                _tokenizer.BEGIN_OF_ACTION,
+                _tokenizer.BEGIN_OF_REASONING,
+                _tokenizer.END_OF_PREFIX_TOKEN,
+            }:
+                continue
+            kept_tokens.append(token)
+
+        if not kept_tokens:
+            return None
+
+        text = self._tokenizer._tokenizer.decode(kept_tokens)
+        text = re.sub(r"<(?:loc|seg)\d+>", " ", text)
+        text = " ".join(text.split())
+        return text or None
 
 
     @override
@@ -105,19 +130,34 @@ class Policy(BasePolicy):
 
         if self._is_fuse_model:
             prefill_rng, reason_rng, action_rng = jax.random.split(sample_rng_or_pytorch_device, 3)
-            _, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = \
+            processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = \
                 self._prefill(prefill_rng, observation)
+
+            # Diagnostic: show prefill decision and logits for the two special tokens.
+            eop_logit_np = np.asarray(eop_logit[0, 0])
+            boa_logit = float(eop_logit_np[257021])  # BEGIN_OF_ACTION
+            bor_logit = float(eop_logit_np[257020])  # BEGIN_OF_REASONING
+            logging.info(
+                f"[Fuse] prefill decision: has_boa={bool(np.asarray(has_boa).item())}, "
+                f"logit(BOA)={boa_logit:.2f}, logit(BOR)={bor_logit:.2f}"
+            )
+
+            # Always generate reasoning tokens. reason() forces BEGIN_OF_REASONING
+            # at step 0 regardless of the prefill decision, so this works even when
+            # has_boa=True. This matches actalign which forces thinking when the
+            # scene plan is empty, and in general the reasoning output is always
+            # useful context for subsequent calls.
             reasoning_tokens = self._reason(
                 reason_rng, eop_logit, kv_cache, prefix_mask, prefix_positions
             )
             raw = np.asarray(reasoning_tokens[0]).tolist()
-            filtered = []
-            for t in raw[1:]:
-                filtered.append(t)
-                if t == 1:
-                    break
-            subtask = self._tokenizer._tokenizer.decode(filtered)
-            all_actions = self._sample_actions(action_rng, observation, **sample_kwargs)
+            subtask = self._decode_reasoning_tokens(raw)
+
+            # Generate actions using the prefix KV cache from prefill
+            actions = self._act(
+                action_rng, processed_obs, kv_cache, prefix_mask, prefix_positions,
+            )
+            all_actions = (actions, {})
         else:
             all_actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
 

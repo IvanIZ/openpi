@@ -440,6 +440,12 @@ class Pi0Fuse(_model.BaseModel):
         """
         batch_size = prefix_mask.shape[0]
         output_tokens = jnp.zeros((batch_size, max_decoding_steps), dtype=jnp.int32)
+        # Do not sample control tokens after step 0; they are protocol markers, not reasoning text.
+        blocked_tokens = jnp.array(
+            [_tokenizer.BEGIN_OF_ACTION, _tokenizer.BEGIN_OF_REASONING, _tokenizer.END_OF_PREFIX_TOKEN]
+        )
+        blocked_logits = jnp.zeros((1, 1, _gemma.PALIGEMMA_VOCAB_SIZE), dtype=last_logit.dtype)
+        blocked_logits = blocked_logits.at[:, :, blocked_tokens].set(-jnp.inf)
 
         idx, k_cache, v_cache = prefix_kv_cache
         k_cache = jnp.pad(k_cache, ((0, 0), (0, 0), (0, max_decoding_steps), (0, 0), (0, 0)))
@@ -449,11 +455,12 @@ class Pi0Fuse(_model.BaseModel):
         def decode_step(carry):
             rng, last_logit, output_tokens, kv_cache, all_eos, step = carry
             step_rng = jax.random.fold_in(rng, step)
+            sample_logit = jnp.where(step == 0, last_logit, last_logit + blocked_logits)
 
             if temperature > 0.0:
-                token = jax.random.categorical(step_rng, last_logit / temperature, axis=-1)
+                token = jax.random.categorical(step_rng, sample_logit / temperature, axis=-1)
             else:
-                token = jnp.argmax(last_logit, axis=-1)
+                token = jnp.argmax(sample_logit, axis=-1)
 
             token = jnp.where(
                 step == 0,
@@ -504,6 +511,14 @@ class Pi0Fuse(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,
     ) -> at.Float[at.Array, "b ah ad"]:
         """Sample actions after prefill, using diffusion denoising."""
+        # Pad prefix KV cache by 1 to make room for the BOA token.
+        # _init_cache sized the cache exactly to prefix_len, so there is no
+        # spare slot for the additional token that act() needs to insert.
+        idx, k_cache, v_cache = prefix_cache
+        k_cache = jnp.pad(k_cache, ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0)))
+        v_cache = jnp.pad(v_cache, ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0)))
+        prefix_cache = (idx, k_cache, v_cache)
+
         boa_token = jnp.broadcast_to(
             _tokenizer.BEGIN_OF_ACTION, (prefix_mask.shape[0], 1)
         )
