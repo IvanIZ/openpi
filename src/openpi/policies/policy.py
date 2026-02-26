@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import logging
 import pathlib
 import re
+import threading
 import time
 from typing import Any, TypeAlias
 
@@ -182,6 +183,190 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
+
+class ReasoningPolicy(BasePolicy):
+    """Stateful inference policy for Pi0Fuse-style think-then-act serving."""
+
+    def __init__(
+        self,
+        model: _model.BaseModel,
+        *,
+        rng: at.KeyArrayLike | None = None,
+        transforms: Sequence[_transforms.DataTransformFn] = (),
+        output_transforms: Sequence[_transforms.DataTransformFn] = (),
+        sample_kwargs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        initial_scene_plan: str = "",
+        force_initial_reasoning: bool = True,
+    ):
+        for method_name in ("prefill", "reason", "act"):
+            if not hasattr(model, method_name):
+                raise ValueError(f"ReasoningPolicy requires model.{method_name}(), but it is missing.")
+
+        self._prefill = nnx_utils.module_jit(model.prefill, static_argnames=("temperature",))
+        self._reason = nnx_utils.module_jit(
+            model.reason,
+            static_argnames=("temperature", "max_decoding_steps"),
+        )
+        self._act = nnx_utils.module_jit(model.act)
+
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._rng = rng or jax.random.key(0)
+        self._sample_kwargs = sample_kwargs or {}
+        self._metadata = metadata or {}
+
+        self._tokenizer = _tokenizer.PaligemmaTokenizer(max_len=50)
+
+        self._temperature = float(self._sample_kwargs.get("temperature", 0.0))
+        
+        self._max_reasoning_steps = int(self._sample_kwargs.get("max_reasoning_steps", 256))
+        self._force_initial_reasoning = bool(
+            self._sample_kwargs.get("force_initial_reasoning", force_initial_reasoning)
+        )
+
+        self._initial_scene_plan = initial_scene_plan
+        self._scene_plan = initial_scene_plan
+        self._instruction: str | None = None
+        self._thought: str | None = None
+
+        self._lock = threading.Lock()
+        self._is_thinking = False
+
+    def start(self) -> None:
+        """Reset rollout-local reasoning state."""
+        self._scene_plan = self._initial_scene_plan
+        self._instruction = None
+        self._thought = None
+        self.is_thinking = False
+
+    def _prepare_obs(self, obs: dict) -> dict:
+        if "prompt" not in obs:
+            raise ValueError("ReasoningPolicy expects a 'prompt' key in observations.")
+
+        prompt = obs["prompt"]
+        if not isinstance(prompt, str):
+            prompt = str(prompt.item() if hasattr(prompt, "item") else prompt)
+
+        if self._instruction is None:
+            self._instruction = f"Instruction: {prompt}. \n"
+        if self._thought is None:
+            self._thought = f"{self._instruction}{self._scene_plan}"
+
+        obs["thought"] = [self._thought]
+        obs["act_with_outdated_thought"] = False
+        obs["think_with_outdated_thought"] = False
+        return obs
+
+    def _decode_reasoning_tokens(self, raw_tokens: list[int]) -> str | None:
+        kept_tokens: list[int] = []
+        for token in raw_tokens[1:]:
+            if token == _tokenizer.PALIGEMMA_EOS_TOKEN:
+                break
+            if token in {
+                0,
+                _tokenizer.BEGIN_OF_ACTION,
+                _tokenizer.BEGIN_OF_REASONING,
+                _tokenizer.END_OF_PREFIX_TOKEN,
+            }:
+                continue
+            kept_tokens.append(token)
+
+        if not kept_tokens:
+            return None
+
+        text = self._tokenizer._tokenizer.decode(kept_tokens)
+        text = re.sub(r"<(?:loc|seg)\d+>", " ", text)
+        text = " ".join(text.split())
+        return text or None
+
+    def _update_thought(self, scene_plan: str | None) -> None:
+        if scene_plan:
+            self._scene_plan = scene_plan
+        self._thought = f"{self._instruction}{self._scene_plan}"
+
+    @override
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[override]
+        del noise  # ReasoningPolicy does not consume external diffusion noise.
+
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._prepare_obs(inputs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        observation = _model.FuseObservation.from_dict(inputs)
+
+        prefill_rng, reason_rng, action_rng, self._rng = jax.random.split(self._rng, 4)
+        processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = self._prefill(
+            prefill_rng, observation, temperature=self._temperature
+        )
+
+        to_act = bool(np.asarray(has_boa).item())
+        to_think = not to_act
+        if self._force_initial_reasoning and self._scene_plan == self._initial_scene_plan:
+            to_think = True
+            to_act = False
+
+        self.is_thinking = to_think
+
+        if to_think:
+            print("mode thinking now...")
+        elif to_act:
+            print("mode acting now...")
+        else:
+            print("mode doing nothing...")
+
+        if to_think:
+            reasoning_tokens = self._reason(
+                reason_rng,
+                eop_logit,
+                kv_cache,
+                prefix_mask,
+                prefix_positions,
+                temperature=self._temperature,
+                max_decoding_steps=self._max_reasoning_steps,
+            )
+            raw_reasoning_tokens = np.asarray(reasoning_tokens[0]).tolist()
+            scene_plan = self._decode_reasoning_tokens(raw_reasoning_tokens)
+            self._update_thought(scene_plan)
+            self.is_thinking = False
+            return {
+                "isthinking": np.True_,
+                "thought": scene_plan or "",
+                "subtask": self._scene_plan,
+            }
+
+        actions = self._act(
+            action_rng,
+            processed_obs,
+            kv_cache,
+            prefix_mask,
+            prefix_positions,
+        )
+        outputs = {
+            "state": np.asarray(inputs["state"][0, ...]),
+            "actions": np.asarray(actions[0, ...]),
+            "subtask": self._scene_plan,
+            "isthinking": np.False_,
+        }
+        transformed = self._output_transform(outputs)
+        transformed["isthinking"] = np.False_
+        return transformed
+
+    @property
+    def is_thinking(self) -> bool:
+        with self._lock:
+            return self._is_thinking
+
+    @is_thinking.setter
+    def is_thinking(self, value: bool) -> None:
+        with self._lock:
+            self._is_thinking = value
 
     @property
     def metadata(self) -> dict[str, Any]:

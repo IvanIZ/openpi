@@ -93,3 +93,68 @@ def create_trained_policy(
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
     )
+
+
+def create_trained_reasoning_policy(
+    train_config: _config.TrainConfig,
+    checkpoint_dir: pathlib.Path | str,
+    *,
+    repack_transforms: transforms.Group | None = None,
+    sample_kwargs: dict[str, Any] | None = None,
+    default_prompt: str | None = None,
+    norm_stats: dict[str, transforms.NormStats] | None = None,
+    initial_scene_plan: str = "",
+    force_initial_reasoning: bool = True,
+) -> _policy.ReasoningPolicy:
+    """Create a stateful reasoning policy (think/act) from a trained checkpoint.
+
+    This helper mirrors `create_trained_policy(...)` but returns `ReasoningPolicy`,
+    intended for Pi0Fuse checkpoints that expose `prefill/reason/act`.
+    """
+
+    repack_transforms = repack_transforms or transforms.Group()
+    checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+
+    # ReasoningPolicy uses JAX inference path (prefill/reason/act).
+    weight_path = os.path.join(checkpoint_dir, "model.safetensors")
+    if os.path.exists(weight_path):
+        raise ValueError(
+            "create_trained_reasoning_policy only supports JAX checkpoints with params/. "
+            "Found model.safetensors instead."
+        )
+
+    logging.info("Loading model...")
+    model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+    for method_name in ("prefill", "reason", "act"):
+        if not hasattr(model, method_name):
+            raise ValueError(
+                f"Model loaded from {checkpoint_dir} is missing `{method_name}`; "
+                "ReasoningPolicy requires a Pi0Fuse-style model."
+            )
+
+    data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    if norm_stats is None:
+        if data_config.asset_id is None:
+            raise ValueError("Asset id is required to load norm stats.")
+        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+
+    return _policy.ReasoningPolicy(
+        model,
+        transforms=[
+            *repack_transforms.inputs,
+            transforms.InjectDefaultPrompt(default_prompt),
+            *data_config.data_transforms.inputs,
+            transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.model_transforms.inputs,
+        ],
+        output_transforms=[
+            *data_config.model_transforms.outputs,
+            transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.data_transforms.outputs,
+            *repack_transforms.outputs,
+        ],
+        sample_kwargs=sample_kwargs,
+        metadata=train_config.policy_metadata,
+        initial_scene_plan=initial_scene_plan,
+        force_initial_reasoning=force_initial_reasoning,
+    )
