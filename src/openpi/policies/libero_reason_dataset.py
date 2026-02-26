@@ -198,9 +198,9 @@ class LiberoReasonDataset(LeRobotDataset):
                         reasonings[reasoning_idx]['content'],
                         reasonings[reasoning_idx]['updated_content']
                     ]
-                    return_dict['image_1'] = self.hf_dataset[idx]['image']
+                    return_dict['observation/image'] = self.hf_dataset[idx]['image']
                     if self.use_wrist_image:
-                        return_dict['image_wrist_1'] = self.hf_dataset[idx]['wrist_image']
+                        return_dict['observation/wrist_image'] = self.hf_dataset[idx]['wrist_image']
                     freezing_action = [0., 0., 0., 0., 0., 0., 0.]
                     return_dict['actions'] = torch.tensor(freezing_action, dtype=torch.float32).repeat(self.action_horizon, 1)
                     return_dict['action_is_pad'] = torch.tensor([True] * self.action_horizon)
@@ -244,9 +244,9 @@ class LiberoReasonDataset(LeRobotDataset):
         elif self.reasoning is not None:
             return_dict['prompt'] = self.reasoning[ep_idx]['segments'][0]['content'].strip()
 
-        return_dict['image_1'] = self.hf_dataset[idx]['image']
+        return_dict['observation/image'] = self.hf_dataset[idx]['image']
         if self.use_wrist_image:
-            return_dict['image_wrist_1'] = self.hf_dataset[idx].get('wrist_image', self.hf_dataset[idx]['image'])
+            return_dict['observation/wrist_image'] = self.hf_dataset[idx].get('wrist_image', self.hf_dataset[idx]['image'])
 
         state_idx = np.array([idx])
         low_dim_dict = {}
@@ -269,7 +269,7 @@ class LiberoReasonDataset(LeRobotDataset):
         else:
             return_dict['actions'] = torch.from_numpy(final_action.astype(np.float32))
 
-        return_dict['state'] = torch.from_numpy(
+        return_dict['observation/state'] = torch.from_numpy(
             np.concatenate([
                 low_dim_dict['eef_pos'].flatten(),
                 low_dim_dict['eef_rot_axis_angle'].flatten(),

@@ -84,42 +84,18 @@ class LiberoInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class LiberoReasonInputs(transforms.DataTransformFn):
+class LiberoReasonInputs(LiberoInputs):
     """Converts inputs for Pi0Fuse reasoning model. Handles thought field."""
 
     model_type: _model.ModelType = _model.ModelType.PI0_FUSE
 
     def __call__(self, data: dict) -> dict:
-        base_image = _parse_image(data.get("image_1", data.get("observation/image")))
-        wrist_image_key = "image_wrist_1" if "image_wrist_1" in data else "observation/wrist_image"
-        if wrist_image_key in data:
-            wrist_image = _parse_image(data[wrist_image_key])
-        else:
-            wrist_image = np.zeros_like(base_image)
-
-        inputs = {
-            "state": data["observation/state"],
-            "image": {
-                "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
-                "right_wrist_0_rgb": np.zeros_like(base_image),
-            },
-            "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
-                "right_wrist_0_rgb": np.False_,
-            },
-        }
-
-        if "actions" in data:
-            inputs["actions"] = data["actions"]
+        inputs = super().__call__(data)
 
         if "thought" in data:
             inputs["thought"] = data["thought"]
             inputs["act_with_outdated_thought"] = data.get("act_with_outdated_thought", False)
             inputs["think_with_outdated_thought"] = data.get("think_with_outdated_thought", False)
-        elif "prompt" in data:
-            inputs["prompt"] = data["prompt"]
 
         return inputs
 

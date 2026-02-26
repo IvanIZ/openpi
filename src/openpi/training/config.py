@@ -15,6 +15,9 @@ import tyro
 
 import os
 
+import openpi
+OPENPI_ROOT = pathlib.Path(openpi.__file__).parent.resolve()
+REPO_ROOT = OPENPI_ROOT / '..' / '..'
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
@@ -395,8 +398,7 @@ class LeRobotLiberoReasonDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # No repack transform: LiberoReasonDataset outputs things
-        # in pi0 format already, not LeRobot format. Maybe this should not be the case
+        # Why is this the reverse of the Libero config?
         data_transforms = _transforms.Group(
             inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
@@ -1066,7 +1068,7 @@ _CONFIGS = [
                 use_history=False,
                 use_outdated_reasoning=True,
                 action_down_sample_steps=1,
-                reasoning_json_path='~/.cache/lerobot/yilin-wu/libero-100/cot_simple.json',
+                reasoning_json_path=REPO_ROOT/'data/libero-100/cot_simple.json',
                 use_val_dataset=False,
                 is_computing_norm_stats=False,
             ),
@@ -1083,10 +1085,10 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=1_000_000,
+            decay_steps=100_000,
             decay_lr=5e-6,
         ),
-        wandb_enabled=False,
+        wandb_enabled=True,
         save_interval=5000,
         keep_period=10_000,
     ),
@@ -1111,7 +1113,7 @@ _CONFIGS = [
                 use_history=False,
                 use_outdated_reasoning=True,
                 action_down_sample_steps=1,
-                reasoning_json_path='~/.cache/lerobot/yilin-wu/libero-10/cot_simple.json',
+                reasoning_json_path=REPO_ROOT/'data/libero-10/cot_simple.json',
                 use_val_dataset=False,
                 is_computing_norm_stats=False,
             ),
@@ -1123,17 +1125,17 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-        num_train_steps=10_000,
-        batch_size=4,
+        num_train_steps=2000,
+        batch_size=128,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=300,
+            warmup_steps=100,
             peak_lr=5e-5,
-            decay_steps=10_000,
+            decay_steps=1000,
             decay_lr=5e-6,
         ),
-        wandb_enabled=False,
-        save_interval=1000,
-        keep_period=5000,
+        wandb_enabled=True,
+        save_interval=500,
+        keep_period=1000,
     ),
 ]
 
