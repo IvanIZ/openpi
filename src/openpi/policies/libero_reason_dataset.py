@@ -212,33 +212,54 @@ class LiberoReasonDataset(LeRobotDataset):
             episode_start_interval = self.reasoning[ep_idx].get('episode_start_interval', [0, 1])
             reasoning_dict = _get_thought(reasonings, idx - start_idx)
 
+            # ========== reasoning segments ==========
             if reasoning_dict.get('updated_content') is not None:
+
+                # prob to use previous thought
                 reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
                 prev_reasoning_prob = self.get_prob(
                     reasoning_dict['start_step'], reasoning_end_step, idx - start_idx
                 )
+
                 if self.rdm.rand() < prev_reasoning_prob:
+                    # case 1: ====== input previous reasoning, output updated reasoning ======
+                    # case 1.1: the first segment
                     if (idx - start_idx) < episode_start_interval[1]:
                         return_dict['thought'] = [reasoning_dict['content'], reasoning_dict['updated_content']]
+
+                    # case 1.2: the non-first segment
                     elif self.rdm.rand() < self.pred_reasoning_prob:
                         return_dict['thought'] = [reasoning_dict['content'], reasoning_dict['updated_content']]
+
+                    # case 2: ====== input previous reasoning, output action ======
+                    # the robot should be able to act even the reasoning is outdated
                     else:
                         return_dict['thought'] = [reasoning_dict['content']]
                         return_dict['act_with_outdated_thought'] = True
                 else:
+                    # case 3: ====== input updated reasoning, output action ======
                     return_dict['thought'] = [reasoning_dict.get('updated_content_w_instruction', reasoning_dict['content'])]
                     if reasoning_dict['end_step'] == -1:
                         freeze_action = True
+            
+            # ========== acting segments with outdated reasoning ==========
             elif 'outdated_content' in reasoning_dict and self.use_outdated_reasoning:
                 outdate_prob = self.get_prob(
                     reasoning_dict['start_step'], reasoning_dict['end_step'],
                     idx - start_idx, 0.4, 0.0
                 )
+
+                # case 1: ====== input outdated reasoning, output <BEGIN_OF_REASONING> ======
                 if self.rdm.rand() < outdate_prob:
                     return_dict['thought'] = [reasoning_dict['outdated_content'], reasoning_dict['content']]
+                    # we only supervise the <BEGIN_OF_REASONING> token
                     return_dict['think_with_outdated_thought'] = True
+                    
+                # case 2: ====== input latest reasoning, output action ======
                 else:
                     return_dict['thought'] = [reasoning_dict['content']]
+            
+            # ========== normal acting segments ==========
             else:
                 return_dict['thought'] = [reasoning_dict['content']]
         elif self.reasoning is not None:
