@@ -276,6 +276,7 @@ class Pi0Fuse(_model.BaseModel):
         observation: _model.FuseObservation,
         *,
         temperature: float = 0.,
+        debug: bool = False,
     ):
         """Prefill the prefix for inference. Returns KV cache and decision to think or act."""
         observation = _model.preprocess_observation(
@@ -283,12 +284,15 @@ class Pi0Fuse(_model.BaseModel):
             image_keys=list(observation.images.keys())
         )
 
+        original_observation = observation
         first_one_indices = jnp.argmax(observation.token_ar_mask, axis=-1)
         padding_mask = jnp.arange(observation.token_ar_mask.shape[-1]) >= first_one_indices[..., jnp.newaxis]
+        masked_tokenized_prompt = jnp.where(padding_mask, 0, observation.tokenized_prompt)
+        masked_tokenized_prompt_mask = jnp.logical_not(padding_mask)
         observation = dataclasses.replace(
             observation,
-            tokenized_prompt=jnp.where(padding_mask, 0, observation.tokenized_prompt),
-            tokenized_prompt_mask=jnp.logical_not(padding_mask),
+            tokenized_prompt=masked_tokenized_prompt,
+            tokenized_prompt_mask=masked_tokenized_prompt_mask,
         )
 
         prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_img_txt(observation)
@@ -315,7 +319,7 @@ class Pi0Fuse(_model.BaseModel):
             token = jnp.argmax(eop_logit, axis=-1)
 
         has_boa = jnp.any(token == _tokenizer.BEGIN_OF_ACTION, axis=1)
-        jax.debug.print("prefill EOP (act, reason): {a}, {b}", a=eop_logit[0][0][_tokenizer.BEGIN_OF_ACTION], b=eop_logit[0][0][_tokenizer.BEGIN_OF_REASONING])
+
         return observation, kv_cache, token, eop_logit, prefix_mask, prefix_positions, has_boa
 
     @at.typecheck

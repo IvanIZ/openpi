@@ -389,6 +389,23 @@ class LiberoReasonDataConfig(DataConfig):
     seed: int = 42
     norm_stats_dir: str = ""
 
+@dataclasses.dataclass(frozen=True)
+class LiberoSkillReasonDataConfig (DataConfig):
+    """Extended data config for LIBERO with reasoning annotations."""
+    action_down_sample_steps: int = 1
+    getitem_type: str = "necessary"
+    use_reasoning: bool = True
+    use_wrist_image: bool = True
+    use_history: bool = False
+    use_outdated_reasoning: bool = True
+    is_computing_norm_stats: bool = False
+    reasoning_json_path: str | None = None
+    use_val_dataset: bool = True
+    val_ratio: float = 0.1
+    create_train_val_split: bool = False
+    seed: int = 42
+    norm_stats_dir: str = ""
+
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotLiberoReasonDataConfig(DataConfigFactory):
@@ -1136,6 +1153,51 @@ _CONFIGS = [
         wandb_enabled=True,
         save_interval=500,
         keep_period=1000,
+    ),
+    # New training config for skill conditioned reasoning
+    TrainConfig(
+        name="pi05_libero_skill_reason_lora",
+        model=pi0_fuse.Pi0FuseConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=32,
+            action_horizon=16,
+            max_token_len=415,
+            diffusion_loss_coeff=1.0,
+        ),
+        data=LeRobotLiberoReasonDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoSkillReasonDataConfig(
+                prompt_from_task=False,
+                use_reasoning=True,
+                use_wrist_image=True,
+                use_history=False,
+                use_outdated_reasoning=True,
+                action_down_sample_steps=1,
+                reasoning_json_path=REPO_ROOT/'data/libero-100/cot_skill_fixed.json',
+                use_val_dataset=False,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_fuse.Pi0FuseConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=53_000,     # 10_600 steps with 64 bs = 1 full pass
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-6,
+        ),
+        wandb_enabled=True,
+        save_interval=5000,
+        keep_period=10_000,
     ),
 ]
 
