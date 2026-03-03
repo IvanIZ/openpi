@@ -3,6 +3,8 @@
 Combines pi05's architecture (AdaRMSNorm, no state_proj) for weight compatibility
 with "Do What You Say" paper's reasoning loss approach (text CE + action diffusion).
 """
+import numpy
+numpy.set_printoptions(threshold=numpy.inf)
 
 import dataclasses
 import logging
@@ -21,14 +23,14 @@ import openpi.models.tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 
-from openpi.models.pi0 import make_attn_mask, posemb_sincos, put_along_last_axis
+from openpi.models.pi0 import Pi0, make_attn_mask, posemb_sincos, put_along_last_axis
 from openpi.models.pi0_fuse_config import Pi0FuseConfig
 
 logger = logging.getLogger("openpi")
 
 PALIGEMMA_EOS_TOKEN = 1
 
-class Pi0Fuse(_model.BaseModel):
+class Pi0Fuse(Pi0):
     """Pi05-compatible model with joint text reasoning loss and action diffusion loss.
 
     Architecture matches pi05 (AdaRMSNorm, no state_proj) for loading pi05 base weights.
@@ -36,124 +38,9 @@ class Pi0Fuse(_model.BaseModel):
     """
 
     def __init__(self, config: Pi0FuseConfig, rngs: nnx.Rngs):
-        super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
-        self.pi05 = config.pi05
-        paligemma_config = _gemma.get_config(config.paligemma_variant)
-        action_expert_config = _gemma.get_config(config.action_expert_variant)
-
-        llm = nnx_bridge.ToNNX(
-            _gemma.Module(
-                configs=[paligemma_config, action_expert_config],
-                embed_dtype=config.dtype,
-                adarms=config.pi05,
-            )
-        )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
-
-        img = nnx_bridge.ToNNX(
-            _siglip.Module(
-                num_classes=paligemma_config.width,
-                variant="So400m/14",
-                pool_type="none",
-                scan=True,
-                dtype_mm=config.dtype,
-            )
-        )
-        img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
-
-        self.PaliGemma = nnx.Dict(llm=llm, img=img)
-        self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
-
-        if config.pi05:
-            self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-            self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-        else:
-            self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
-            self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
-            self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-
-        self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        assert config.pi05
+        super().__init__(config, rngs)
         self.diffusion_loss_coeff = config.diffusion_loss_coeff
-        self.deterministic = True
-
-    @at.typecheck
-    def embed_img_txt(
-        self, obs: _model.FuseObservation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Int[at.Array, "b s"]]:
-        """Embed images and tokenized prompt (text prefix + text suffix)."""
-        input_mask = []
-        ar_mask = []
-        embeddings = []
-
-        for name in obs.images:
-            image_emb, _ = self.PaliGemma.img(obs.images[name], train=False)
-            embeddings.append(image_emb)
-            input_mask.append(
-                einops.repeat(obs.image_masks[name], "b -> b s", s=image_emb.shape[1])
-            )
-            ar_mask.append(0 * input_mask[-1])
-
-        assert obs.tokenized_prompt is not None
-        assert obs.tokenized_prompt_mask is not None
-        assert obs.token_ar_mask is not None
-
-        txt_emb = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
-        embeddings.append(txt_emb)
-        input_mask.append(obs.tokenized_prompt_mask)
-        ar_mask.append(obs.token_ar_mask)
-
-        embeddings = jnp.concatenate(embeddings, axis=1)
-        input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.concatenate(ar_mask, axis=1)
-        return embeddings, input_mask, ar_mask
-
-    @at.typecheck
-    def embed_action_suffix(
-        self, obs: _model.FuseObservation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
-    ) -> tuple[
-        at.Float[at.Array, "b s emb"],
-        at.Bool[at.Array, "b s"],
-        at.Bool[at.Array, " s"],
-        at.Float[at.Array, "b emb"] | None,
-    ]:
-        """Embed action tokens for the action expert. Pi05-style: AdaRMSNorm, no state token."""
-        input_mask = []
-        ar_mask = []
-        tokens = []
-
-        if not self.pi05:
-            state_token = self.state_proj(obs.state)[:, None, :]
-            tokens.append(state_token)
-            input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
-            ar_mask += [True]
-
-        action_tokens = self.action_in_proj(noisy_actions)
-        time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
-
-        if self.pi05:
-            time_emb = self.time_mlp_in(time_emb)
-            time_emb = nnx.swish(time_emb)
-            time_emb = self.time_mlp_out(time_emb)
-            time_emb = nnx.swish(time_emb)
-            action_expert_tokens = action_tokens
-            adarms_cond = time_emb
-        else:
-            time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
-            action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
-            action_time_tokens = self.action_time_mlp_in(action_time_tokens)
-            action_time_tokens = nnx.swish(action_time_tokens)
-            action_time_tokens = self.action_time_mlp_out(action_time_tokens)
-            action_expert_tokens = action_time_tokens
-            adarms_cond = None
-
-        tokens.append(action_expert_tokens)
-        input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
-        ar_mask += [True] + ([False] * (self.action_horizon - 1))
-
-        tokens = jnp.concatenate(tokens, axis=1)
-        input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask, adarms_cond
 
     @override
     def compute_loss(
@@ -172,15 +59,15 @@ class Pi0Fuse(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        img_txt_tokens, img_txt_mask, img_txt_ar_mask = self.embed_img_txt(observation)
-        action_tokens, action_mask, action_ar_mask, adarms_cond = self.embed_action_suffix(observation, x_t, time)
+        img_txt_tokens, img_txt_mask, img_txt_ar_mask = self.embed_prefix(observation)
+        action_tokens, action_mask, action_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
 
         input_mask = jnp.concatenate([img_txt_mask, action_mask], axis=1)
-        ar_mask = jnp.concatenate([img_txt_ar_mask, jnp.broadcast_to(action_ar_mask, (input_mask.shape[0], action_mask.shape[1]))], axis=1)
+        ar_mask = jnp.concatenate([img_txt_ar_mask, action_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
 
-        (img_txt_pre_logits, action_out), _ = self.PaliGemma.llm(
+        (img_txt_pre_logits, action_out), _, intermediates = self.PaliGemma.llm(
             [img_txt_tokens, action_tokens], mask=attn_mask, positions=positions,
             adarms_cond=[None, adarms_cond],
         )
@@ -213,62 +100,6 @@ class Pi0Fuse(_model.BaseModel):
         loss = txt_loss + self.diffusion_loss_coeff * action_loss
         return loss
 
-    @override
-    def sample_actions(
-        self,
-        rng: at.KeyArrayLike,
-        observation: _model.FuseObservation,
-        *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
-    ) -> tuple[_model.Actions, dict[str, at.Array]]:
-        observation = _model.preprocess_observation(
-            None, observation, train=False,
-            image_keys=list(observation.images.keys())
-        )
-
-        info = {}
-        info['num_action_loss_fraction'] = (
-            jnp.sum(observation.diffusion_loss_mask) /
-            observation.diffusion_loss_mask.shape[0]
-        )
-
-        img_txt_tokens, img_txt_mask, img_txt_ar_mask = self.embed_img_txt(observation)
-        img_txt_attn_mask = make_attn_mask(img_txt_mask, img_txt_ar_mask)
-        positions = jnp.cumsum(img_txt_mask, axis=1) - 1
-
-        (img_txt_pre_logits, _), kv_cache = self.PaliGemma.llm(
-            [img_txt_tokens, None], mask=img_txt_attn_mask, positions=positions,
-            adarms_cond=[None, None],
-        )
-
-        dt = -1.0 / num_steps
-        batch_size = observation.state.shape[0]
-        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
-
-        def step(carry):
-            x_t, t = carry
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_action_suffix(
-                observation, x_t, jnp.broadcast_to(t, batch_size)
-            )
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            prefix_attn_mask = einops.repeat(img_txt_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            pos = jnp.sum(img_txt_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-
-            (_, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens], mask=full_attn_mask, positions=pos,
-                kv_cache=kv_cache, adarms_cond=[None, adarms_cond],
-            )
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
-            return x_t + dt * v_t, t + dt
-
-        def cond(carry):
-            _, t = carry
-            return t >= -dt / 2
-
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0, info
-
     @at.typecheck
     def prefill(
         self,
@@ -295,11 +126,12 @@ class Pi0Fuse(_model.BaseModel):
             tokenized_prompt_mask=masked_tokenized_prompt_mask,
         )
 
-        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_img_txt(observation)
+        prefix_token_embeddings, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
 
-        (pre_logit, _), kv_cache = self.PaliGemma.llm(
+        prefix_positions = jnp.cumsum(prefix_mask, axis=-1) - 1
+
+        (pre_logit, _), kv_cache, intermediates = self.PaliGemma.llm(
             [prefix_token_embeddings, None], mask=prefix_attn_mask, positions=prefix_positions,
             adarms_cond=[None, None],
         )
@@ -377,7 +209,7 @@ class Pi0Fuse(_model.BaseModel):
             full_mask = jnp.concatenate([prefix_mask, jnp.broadcast_to(decode_visible, (batch_size, max_decoding_steps))], axis=-1)
             mask = full_mask[:, None, :]
 
-            (last_pre_logit, _), kv_cache = self.PaliGemma.llm(
+            (last_pre_logit, _), kv_cache, intermediates = self.PaliGemma.llm(
                 [token_embedding, None], mask=mask, positions=positions,
                 kv_cache=kv_cache, adarms_cond=[None, None],
             )
@@ -399,7 +231,6 @@ class Pi0Fuse(_model.BaseModel):
     def act(
         self,
         rng: at.KeyArrayLike,
-        observation: _model.FuseObservation,
         prefix_cache: _gemma.KVCache,
         prefix_mask: at.Bool[at.Array, "b p"],
         prefix_positions: at.Int[at.Array, "b p"],
@@ -415,6 +246,8 @@ class Pi0Fuse(_model.BaseModel):
         v_cache = jnp.pad(v_cache, ((0, 0), (0, 0), (0, 1), (0, 0), (0, 0)))
         prefix_cache = (idx, k_cache, v_cache)
 
+        batch_size = prefix_mask.shape[0]
+
         boa_token = jnp.broadcast_to(
             _tokenizer.BEGIN_OF_ACTION, (prefix_mask.shape[0], 1)
         )
@@ -425,36 +258,13 @@ class Pi0Fuse(_model.BaseModel):
         )
         boa_positions = prefix_positions[:, [-1]] + 1
         boa_token_embedding = self.PaliGemma.llm(boa_token, method="embed")
-        (_, _), img_txt_kv_cache = self.PaliGemma.llm(
+        (_, _), img_txt_kv_cache, intermediates = self.PaliGemma.llm(
             [boa_token_embedding, None], mask=boa_attn_mask, positions=boa_positions,
             kv_cache=prefix_cache, adarms_cond=[None, None],
         )
         img_txt_mask = jnp.pad(prefix_mask, ((0, 0), (0, 1)), constant_values=1)
 
         dt = -1.0 / num_steps
-        batch_size = observation.state.shape[0]
         noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
-        def denoise_step(carry):
-            x_t, t = carry
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_action_suffix(
-                observation, x_t, jnp.broadcast_to(t, batch_size)
-            )
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            prefix_attn_mask = einops.repeat(img_txt_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            pos = jnp.sum(img_txt_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-
-            (_, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens], mask=full_attn_mask, positions=pos,
-                kv_cache=img_txt_kv_cache, adarms_cond=[None, adarms_cond],
-            )
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
-            return x_t + dt * v_t, t + dt
-
-        def denoise_cond(carry):
-            _, t = carry
-            return t >= -dt / 2
-
-        x_0, _ = jax.lax.while_loop(denoise_cond, denoise_step, (noise, 1.0))
-        return x_0
+        return self._generate_action(noise, dt, img_txt_kv_cache, img_txt_mask, batch_size)

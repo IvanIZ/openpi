@@ -151,7 +151,7 @@ class Pi0(_model.BaseModel):
                 )
             )
             # image tokens attend to each other
-            ar_mask += [False] * image_tokens.shape[1]
+            ar_mask.append(jnp.zeros(image_tokens.shape[1], dtype=bool))
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
@@ -161,15 +161,18 @@ class Pi0(_model.BaseModel):
             # full attention between image and language inputs
             #ar_mask += [False] * tokenized_inputs.shape[1]
             # subtask_generation repo has this set as True
-            ar_mask += [True] * tokenized_inputs.shape[1]
+            try:
+                ar_mask.append(obs.token_ar_mask.flatten())
+            except:
+                ar_mask.append(jnp.ones(tokenized_inputs.shape[1], dtype=bool))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.array(ar_mask)
+        ar_mask = jnp.concatenate(ar_mask, axis=0, dtype=bool)
         return tokens, input_mask, ar_mask
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self, obs: _model.Observation | None, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
@@ -223,6 +226,13 @@ class Pi0(_model.BaseModel):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
+        # Diffusion loss.
+        # Take real actions, and add noise according to noise schedule (random distribution here, sample a time point)
+        # Target of diffusion network is to take the complete noise, and a noised action (x_t), and produce the correction
+        # to remove from the noise (u_t, actions with noise removed)
+        #
+        # Note in the inference code (bottom of file) that dt is negative, so it emulates this process,
+        # but with an additional "smoothing factor" of only moving by `dt` at a time.
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
@@ -237,7 +247,7 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+        (prefix_out, suffix_out), _, intermediates = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
@@ -269,7 +279,7 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
         prefix_positions = jnp.cumsum(prefix_mask, axis=-1) - 1
         # import pdb; pdb.set_trace()
-        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+        (prefix_out, _), kv_cache, intermediates = self.PaliGemma.llm(
             [prefix_token_embeddings, None], mask=prefix_attn_mask, positions=prefix_positions, adarms_cond=[None, None]
         )
         last_token_embedding = prefix_out[:, -1:]
@@ -307,7 +317,7 @@ class Pi0(_model.BaseModel):
             all_eos = jnp.all(has_eos)
 
             # Decode one step
-            token_embedding =  self.PaliGemma.llm(token, method="embed")
+            token_embedding = self.PaliGemma.llm(token, method="embed")
             positions = prefill_len[:, None] + step
 
 			# This seems wrong. It seems to produce a "flat" attention mask instead of an autoregressive one
@@ -321,7 +331,8 @@ class Pi0(_model.BaseModel):
             )
             #print(mask.shape)
 
-            (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            # Ignore: intermediates
+            (prefix_out, _), kv_cache, _ = self.PaliGemma.llm(
                 [token_embedding, None], mask=mask, positions=positions, adarms_cond=[None, None], kv_cache=cache
             )
             last_token_embedding = prefix_out[:, -1:]
@@ -349,31 +360,15 @@ class Pi0(_model.BaseModel):
         #  ar_mask [prefix_len+max_decoding_steps]
         return output_tokens, kv_cache, mask, ar_mask
 
-    @override
-    def sample_actions(
-        self,
-        rng: at.KeyArrayLike,
-        observation: _model.Observation,
-        *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
-        observation = _model.preprocess_observation(None, observation, train=False)
-        # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
-        # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
-        dt = -1.0 / num_steps
-        batch_size = observation.state.shape[0]
-		# TODO: Can cause issues since subtask lengths are different, leading to more tokens past EOS if batch size is not 1.
-        if noise is None:
-            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
-        # first fill KV cache with a forward pass of the prefix
-        output_tokens, kv_cache, prefix_mask, prefix_ar_mask = self.sample_low_level_task(rng, observation, max_decoding_steps=20, temperature=0.0)
-
+    def _generate_action(self, noised_action, dt, kv_cache, prefix_mask, batch_size):
+        """
+        Helper function to run the diffusion process.
+        """
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
+                None, x_t, jnp.broadcast_to(time, batch_size)
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
@@ -394,7 +389,7 @@ class Pi0(_model.BaseModel):
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            (prefix_out, suffix_out), _, intermediates = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=query_attn_mask,
                 positions=positions,
@@ -411,5 +406,28 @@ class Pi0(_model.BaseModel):
             # robust to floating-point error
             return time >= -dt / 2
 
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return (x_0, output_tokens)
+        x_0, _ = jax.lax.while_loop(cond, step, (noised_action, 1.0))
+        return x_0
+
+
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        observation = _model.preprocess_observation(None, observation, train=False)
+        # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
+        # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+		# TODO: Can cause issues since subtask lengths are different, leading to more tokens past EOS if batch size is not 1.
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        # first fill KV cache with a forward pass of the prefix
+        output_tokens, kv_cache, prefix_mask, prefix_ar_mask = self.sample_low_level_task(rng, observation, max_decoding_steps=20, temperature=0.0)
+        return (self._generate_action(noise, dt, batch_size, kv_cache, prefix_mask, batch_size), output_tokens)

@@ -358,7 +358,7 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, kv_cache
+        return xs, (kv_cache, xs)
 
 
 KVCache: TypeAlias = tuple[at.Int[at.Array, "l b"], at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -428,19 +428,19 @@ class Module(nn.Module):
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
-    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
+    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache, Sequence[at.Float[at.Array, "l b _t _d"] | None]]:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        embedded, (kv_cache, intermediates) = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
         return [
             f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
-        ], kv_cache
+        ], kv_cache, intermediates
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""
