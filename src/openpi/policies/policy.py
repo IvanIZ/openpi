@@ -318,8 +318,6 @@ class ReasoningPolicy(BasePolicy):
             print("mode thinking now...")
         elif to_act:
             print("mode acting now...")
-        else:
-            print("mode doing nothing...")
 
         if to_think:
             reasoning_tokens = self._reason(

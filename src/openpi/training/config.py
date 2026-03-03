@@ -1080,17 +1080,17 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-        num_train_steps=31_800,     # 10_600 steps with 64 bs = 1 full pass
-        batch_size=64,
+        num_train_steps=8_000,     # 10_600 steps with 64 bs = 1 full pass
+        batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=100_000,
+            decay_steps=8_000,
             decay_lr=5e-6,
         ),
         wandb_enabled=True,
-        save_interval=5000,
-        keep_period=10_000,
+        save_interval=1_000,
+        keep_period=2_000,
     ),
     # Pi05 LoRA finetuning with reasoning - LIBERO-10 (smaller, for testing)
     TrainConfig(
@@ -1126,11 +1126,11 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
         num_train_steps=2000,
-        batch_size=128,
+        batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=100,
             peak_lr=5e-5,
-            decay_steps=1000,
+            decay_steps=2000,
             decay_lr=5e-6,
         ),
         wandb_enabled=True,

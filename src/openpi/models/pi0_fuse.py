@@ -315,6 +315,7 @@ class Pi0Fuse(_model.BaseModel):
             token = jnp.argmax(eop_logit, axis=-1)
 
         has_boa = jnp.any(token == _tokenizer.BEGIN_OF_ACTION, axis=1)
+        jax.debug.print("prefill EOP (act, reason): {a}, {b}", a=eop_logit[0][0][_tokenizer.BEGIN_OF_ACTION], b=eop_logit[0][0][_tokenizer.BEGIN_OF_REASONING])
         return observation, kv_cache, token, eop_logit, prefix_mask, prefix_positions, has_boa
 
     @at.typecheck

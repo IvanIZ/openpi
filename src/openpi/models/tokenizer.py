@@ -78,6 +78,9 @@ class FusePaligemmaTokenizer:
         think_with_outdated_thought: bool,
         state: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        # If thought is 2 elements, we are in think mode. (prev_thought or instruction + template, next_thought)
+        # If thought is 1 element, we "want" to act. (prev_thought only)
+
         prefix = thought[0]
         if state is not None:
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
@@ -89,10 +92,14 @@ class FusePaligemmaTokenizer:
             [END_OF_PREFIX_TOKEN]
         )
 
+        # Think mode. No loss on the action. (diffusion_loss_mask)
+        # LLM trained to imitate the "next thought".
         if len(thought) > 1:
             suffix = thought[1]
             suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=True)
             diffusion_loss_mask = np.False_
+
+        # Act mode. The LLM should output <BOA>, and we grade the action.
         else:
             suffix_tokens = [BEGIN_OF_ACTION]
             diffusion_loss_mask = np.True_
