@@ -446,9 +446,13 @@ class SkillReasoningPolicy(BasePolicy):
         if self._thought is None:
             self._thought = f"{self._instruction}{self._scene_plan}"
 
-        obs["thought"] = [self._thought]
+        # print(f"mode -------------------> {obs['mode']}")
+
+        if obs['mode'] == 'thinking':
+            obs["thought"] = [self._thought]
         obs["act_with_outdated_thought"] = False
         obs["think_with_outdated_thought"] = False
+        obs['prompt'] = ''
         return obs
 
     def _decode_reasoning_tokens(self, raw_tokens: list[int]) -> str | None:
@@ -485,6 +489,8 @@ class SkillReasoningPolicy(BasePolicy):
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._prepare_obs(inputs)
+        print(f"inputs -------------------> {inputs['thought']}")
+        mode = inputs['mode']
         inputs = self._input_transform(inputs)
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         observation = _model.FuseObservation.from_dict(inputs)
@@ -500,6 +506,7 @@ class SkillReasoningPolicy(BasePolicy):
             to_think = True
             to_act = False
 
+        to_think = mode == 'thinking'
         self.is_thinking = to_think
 
         if to_think:
@@ -519,6 +526,7 @@ class SkillReasoningPolicy(BasePolicy):
             )
             raw_reasoning_tokens = np.asarray(reasoning_tokens[0]).tolist()
             scene_plan = self._decode_reasoning_tokens(raw_reasoning_tokens)
+            print("output scene plan: ", scene_plan)
             self._update_thought(scene_plan)
             self.is_thinking = False
             return {
