@@ -157,7 +157,7 @@ class Policy(BasePolicy):
 
             # Generate actions using the prefix KV cache from prefill
             actions = self._act(
-                action_rng, processed_obs, kv_cache, prefix_mask, prefix_positions,
+                action_rng, kv_cache, prefix_mask, prefix_positions,
             )
             all_actions = (actions, {})
         else:
@@ -209,6 +209,7 @@ class ReasoningPolicy(BasePolicy):
             if not hasattr(model, method_name):
                 raise ValueError(f"ReasoningPolicy requires model.{method_name}(), but it is missing.")
 
+        self._model = model # Save for debugging
         self._prefill = nnx_utils.module_jit(model.prefill, static_argnames=("temperature", "debug"))
         self._reason = nnx_utils.module_jit(
             model.reason,
@@ -305,7 +306,7 @@ class ReasoningPolicy(BasePolicy):
 
         prefill_rng, reason_rng, action_rng, self._rng = jax.random.split(self._rng, 4)
         processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = self._prefill(
-            prefill_rng, observation, temperature=self._temperature, debug=self._debug_prefill
+            prefill_rng, observation, temperature=self._temperature
         )
 
         to_act = bool(np.asarray(has_boa).item())
@@ -320,8 +321,6 @@ class ReasoningPolicy(BasePolicy):
             print("mode thinking now...")
         elif to_act:
             print("mode acting now...")
-        else:
-            print("mode doing nothing...")
 
         if to_think:
             reasoning_tokens = self._reason(
@@ -345,7 +344,6 @@ class ReasoningPolicy(BasePolicy):
 
         actions = self._act(
             action_rng,
-            processed_obs,
             kv_cache,
             prefix_mask,
             prefix_positions,
@@ -375,9 +373,11 @@ class ReasoningPolicy(BasePolicy):
         return self._metadata
 
 
-
-class SkillReasoningPolicy(BasePolicy):
-    """Stateful inference policy for Pi0Fuse-style think-then-act serving."""
+class SkillReasoningPolicy(ReasoningPolicy):
+    """
+    Stub class if we want to extend ReasoningPolicy with anything.
+    @see ReasoningPolicy methods
+    """
 
     def __init__(
         self,
@@ -541,30 +541,8 @@ class SkillReasoningPolicy(BasePolicy):
             kv_cache,
             prefix_mask,
             prefix_positions,
+
         )
-        outputs = {
-            "state": np.asarray(inputs["state"][0, ...]),
-            "actions": np.asarray(actions[0, ...]),
-            "subtask": self._scene_plan,
-            "isthinking": np.False_,
-        }
-        transformed = self._output_transform(outputs)
-        transformed["isthinking"] = np.False_
-        return transformed
-
-    @property
-    def is_thinking(self) -> bool:
-        with self._lock:
-            return self._is_thinking
-
-    @is_thinking.setter
-    def is_thinking(self, value: bool) -> None:
-        with self._lock:
-            self._is_thinking = value
-
-    @property
-    def metadata(self) -> dict[str, Any]:
-        return self._metadata
 
 
 class PolicyRecorder(_base_policy.BasePolicy):
