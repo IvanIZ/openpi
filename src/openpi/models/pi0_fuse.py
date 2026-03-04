@@ -183,13 +183,14 @@ class Pi0Fuse(Pi0):
         def decode_step(carry):
             rng, last_logit, output_tokens, kv_cache, all_eos, step = carry
             step_rng = jax.random.fold_in(rng, step)
-            sample_logit = jnp.where(step == 0, last_logit, last_logit)
+            sample_logit = last_logit
 
             if temperature > 0.0:
                 token = jax.random.categorical(step_rng, sample_logit / temperature, axis=-1)
             else:
                 token = jnp.argmax(sample_logit, axis=-1)
 
+            # Force the first token generated to be a BOR token. Otherwise, this is just normal generation
             token = jnp.where(
                 step == 0,
                 jnp.full_like(token, _tokenizer.BEGIN_OF_REASONING),
@@ -206,9 +207,17 @@ class Pi0Fuse(Pi0):
             positions = prefix_positions[:, [-1]] + step + 1
 
             decode_visible = jnp.arange(max_decoding_steps) <= step
-            full_mask = jnp.concatenate([prefix_mask, jnp.broadcast_to(decode_visible, (batch_size, max_decoding_steps))], axis=-1)
+            full_mask = jnp.concatenate(
+                [
+                    prefix_mask,
+                    jnp.broadcast_to(decode_visible, (batch_size, max_decoding_steps))
+                ],
+                axis=-1
+            )
+
             mask = full_mask[:, None, :]
 
+            # Text head only (second output ignored)
             (last_pre_logit, _), kv_cache, intermediates = self.PaliGemma.llm(
                 [token_embedding, None], mask=mask, positions=positions,
                 kv_cache=kv_cache, adarms_cond=[None, None],
