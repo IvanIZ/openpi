@@ -449,8 +449,8 @@ class SkillReasoningPolicy(ReasoningPolicy):
 
         # print(f"mode -------------------> {obs['mode']}")
 
-        if obs['mode'] == 'thinking':
-            obs["thought"] = [self._thought]
+        # if obs['mode'] == 'thinking':
+        #     obs["thought"] = [self._thought]
         obs["act_with_outdated_thought"] = False
         obs["think_with_outdated_thought"] = False
         obs['prompt'] = ''
@@ -533,17 +533,24 @@ class SkillReasoningPolicy(ReasoningPolicy):
             return {
                 "isthinking": np.True_,
                 "thought": scene_plan or "",
-                "subtask": self._scene_plan,
+                "subtask": scene_plan,
             }
 
         actions = self._act(
             action_rng,
-            processed_obs,
             kv_cache,
             prefix_mask,
             prefix_positions,
-
         )
+        outputs = {
+            "state": np.asarray(inputs["state"][0, ...]),
+            "actions": np.asarray(actions[0, ...]),
+            "subtask": self._scene_plan,
+            "isthinking": np.False_,
+        }
+        transformed = self._output_transform(outputs)
+        transformed["isthinking"] = np.False_
+        return transformed
 
 
 class PolicyRecorder(_base_policy.BasePolicy):
