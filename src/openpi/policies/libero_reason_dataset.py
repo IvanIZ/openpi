@@ -329,6 +329,8 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         self.use_outdated_reasoning = data_config.use_outdated_reasoning
         self.pred_reasoning_prob = 0.7
         self.updated_skill_prob = 0.5
+        self.learn_plan_generation_prob = 0.75
+        self.learn_reasoning_prob = 0.5
         self.is_computing_norm_stats = data_config.is_computing_norm_stats
 
         self.low_dim_keys = ["eef_pos", "eef_rot_axis_angle", "gripper_control"]
@@ -471,15 +473,33 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                     reasoning_dict['start_step'], reasoning_end_step, idx - start_idx
                 )
 
-                if self.rdm.rand() < prev_reasoning_prob:
-                    # case 1: ====== input reasoning, output reasoning ======
-                    # case 1.1: for some probability, input outdated reasoning, output new reasoning
-                    if self.rdm.rand() < self.updated_skill_prob:
-                        return_dict['thought'] = [reasoning_dict['content'], reasoning_dict['updated_content']]
+                # if self.rdm.rand() < prev_reasoning_prob:
+                    # # case 1: ====== input reasoning, output reasoning ======
+                    # # case 1.1: for some probability, input outdated reasoning, output new reasoning
+                    # if self.rdm.rand() < self.updated_skill_prob:
+                    #     return_dict['thought'] = [reasoning_dict['content'], reasoning_dict['updated_content']]
 
-                    # case 1.2: for some probability, input new reasoning, out new reasoning
+                    # # case 1.2: for some probability, input new reasoning, out new reasoning
+                    # else:
+                    #     return_dict['thought'] = [reasoning_dict['updated_content'], reasoning_dict['updated_content']]
+
+
+                # ############################## new reasoning format for skill reasoning v2 ###################################
+                if self.rdm.rand() < self.learn_reasoning_prob:
+                    # case 1.1: the first segment
+                    if (idx - start_idx) < episode_start_interval[1]:
+
+                        # some probability to learn plan generation
+                        if self.rdm.rand() < self.learn_plan_generation_prob:
+                            return_dict['thought'] = [reasoning_dict['instruction'], reasoning_dict['plan']]
+                        
+                        # some probability to output updated skill
+                        else:
+                            return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['updated_skill']]
+                    
+                    # case 1.2: the non-first segment, plan always exists, output updated skill
                     else:
-                        return_dict['thought'] = [reasoning_dict['updated_content'], reasoning_dict['updated_content']]
+                        return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['updated_skill']]
 
                 else:
                     # case 2: ====== input updated reasoning, output action ======
@@ -487,27 +507,15 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                     if reasoning_dict['end_step'] == -1:
                         freeze_action = True
             
-            # ========== acting segments with outdated reasoning ==========
-            # NOTE: this case does not seem to be used as cot_simple.json for libero-100 (or 10) does not containt outdated_content
-            elif 'outdated_content' in reasoning_dict and self.use_outdated_reasoning:
-                outdate_prob = self.get_prob(
-                    reasoning_dict['start_step'], reasoning_dict['end_step'],
-                    idx - start_idx, 0.4, 0.0
-                )
-
-                # case 1: ====== input outdated reasoning, output <BEGIN_OF_REASONING> ======
-                if self.rdm.rand() < outdate_prob:
-                    return_dict['thought'] = [reasoning_dict['outdated_content'], reasoning_dict['content']]
-                    # we only supervise the <BEGIN_OF_REASONING> token
-                    return_dict['think_with_outdated_thought'] = True
-
-                # case 2: ====== input latest reasoning, output action ======
-                else:
-                    return_dict['thought'] = [reasoning_dict['skill']]
             
             # ========== normal acting segments ==========
             else:
-                return_dict['thought'] = [reasoning_dict['skill']]
+
+                if self.rdm.rand() < self.learn_reasoning_prob:
+                    return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['skill']]
+                else:
+                    return_dict['thought'] = [reasoning_dict['skill']]
+
         elif self.reasoning is not None:
             return_dict['prompt'] = self.reasoning[ep_idx]['segments'][0]['content'].strip()
 
