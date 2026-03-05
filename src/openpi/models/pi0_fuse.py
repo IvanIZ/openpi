@@ -152,7 +152,7 @@ class Pi0Fuse(Pi0):
 
         has_boa = jnp.any(token == _tokenizer.BEGIN_OF_ACTION, axis=1)
 
-        return observation, kv_cache, token, eop_logit, prefix_mask, prefix_positions, has_boa
+        return observation, kv_cache, token, eop_logit, prefix_mask, prefix_positions, has_boa, intermediates
 
     @at.typecheck
     def reason(
