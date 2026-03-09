@@ -497,7 +497,7 @@ class SkillReasoningPolicy(ReasoningPolicy):
         observation = _model.FuseObservation.from_dict(inputs)
 
         prefill_rng, reason_rng, action_rng, self._rng = jax.random.split(self._rng, 4)
-        processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa = self._prefill(
+        processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa, _ = self._prefill(
             prefill_rng, observation, temperature=self._temperature
         )
 
