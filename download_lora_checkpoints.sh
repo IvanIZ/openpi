@@ -140,19 +140,19 @@ if [[ $# -eq 0 ]]; then
     exit 0
 fi
 
-CHECKPOINT_PATHS=()
+INCLUDE_ARGS=()
 HIGHEST_INPUT_CKPT=""
 for ckpt in "$@"; do
     if [[ ! "${ckpt}" =~ ^[0-9]+$ ]]; then
         echo "Error: checkpoint ID must be numeric, got '${ckpt}'." >&2
         exit 1
     fi
-    CHECKPOINT_PATHS+=("${ckpt}/")
+    INCLUDE_ARGS+=(--include "${ckpt}/*")
     if [[ -z "${HIGHEST_INPUT_CKPT}" || "${ckpt}" -gt "${HIGHEST_INPUT_CKPT}" ]]; then
         HIGHEST_INPUT_CKPT="${ckpt}"
     fi
 done
 
 echo "Downloading checkpoints from ${REPO_ID} into ${TARGET_DIR}: $*"
-"${HF_CMD[@]}" download "${REPO_ID}" "${CHECKPOINT_PATHS[@]}" --repo-type model --local-dir "${TARGET_DIR}"
+"${HF_CMD[@]}" download "${REPO_ID}" --repo-type model --local-dir "${TARGET_DIR}" "${INCLUDE_ARGS[@]}"
 create_assets_symlink "${HIGHEST_INPUT_CKPT}"
