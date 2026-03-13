@@ -1233,15 +1233,15 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-        num_train_steps=100_000,     # 10_600 steps with 64 bs = 1 full pass
+        num_train_steps=30_000,     # 10_600 steps with 64 bs = 1 full pass
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=100_000,
+            decay_steps=30_000,
             decay_lr=5e-6,
         ),
-        wandb_enabled=True,
+        wandb_enabled=False,
         save_interval=5000,
         keep_period=10_000,
     ),

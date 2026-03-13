@@ -162,7 +162,7 @@ class Pi0(_model.BaseModel):
             #ar_mask += [False] * tokenized_inputs.shape[1]
             # subtask_generation repo has this set as True
             try:
-                ar_mask.append(obs.token_ar_mask.flatten())
+                ar_mask.append(obs.token_ar_mask[0])
             except:
                 ar_mask.append(jnp.ones(tokenized_inputs.shape[1], dtype=bool))
         tokens = jnp.concatenate(tokens, axis=1)
