@@ -441,28 +441,10 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         return_dict['think_with_outdated_thought'] = False
 
         if self.use_reasoning and self.reasoning is not None:
-            reasonings = self.reasoning[ep_idx]['segments']
-
-            if ep_idx in self.reasoning.get('vision_language_episode_idx', []):
-                if not self.is_computing_norm_stats:
-                    reasoning_idx = self.rdm.randint(0, len(reasonings))
-                    return_dict['thought'] = [
-                        reasonings[reasoning_idx]['content'],
-                        reasonings[reasoning_idx]['updated_content']
-                    ]
-                    return_dict['observation/image'] = self.hf_dataset[idx]['image']
-                    if self.use_wrist_image:
-                        return_dict['observation/wrist_image'] = self.hf_dataset[idx]['wrist_image']
-                    freezing_action = [0., 0., 0., 0., 0., 0., 0.]
-                    return_dict['actions'] = torch.tensor(freezing_action, dtype=torch.float32).repeat(self.action_horizon, 1)
-                    return_dict['action_is_pad'] = torch.tensor([True] * self.action_horizon)
-                    return_dict['state'] = torch.zeros(8, dtype=torch.float32)
-                    for key in ['timestamp', 'frame_index', 'episode_index', 'index', 'task_index']:
-                        return_dict[key] = current_idx_item[key]
-                    return return_dict
+            episode_reasoning = self.reasoning[ep_idx]
 
             episode_start_interval = self.reasoning[ep_idx].get('episode_start_interval', [0, 1])
-            reasoning_dict = _get_thought(reasonings, idx - start_idx)
+            reasoning_dict = _get_thought(episode_reasoning['segments'], idx - start_idx)
 
             # ========== reasoning segments ==========
             if reasoning_dict.get('updated_content') is not None:
@@ -495,11 +477,11 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                         
                         # some probability to output updated skill
                         else:
-                            return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['updated_skill']]
+                            return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['updated_skill']]
                     
                     # case 1.2: the non-first segment, plan always exists, output updated skill
                     else:
-                        return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['updated_skill']]
+                        return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['updated_skill']]
 
                 else:
                     # case 2: ====== input updated reasoning, output action ======
@@ -510,9 +492,11 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             
             # ========== normal acting segments ==========
             else:
-
+                # Cut off actions at transitions
+                reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
+                end_idx = start_idx + reasoning_end_step
                 if self.rdm.rand() < self.learn_reasoning_prob:
-                    return_dict['thought'] = [reasoning_dict['plan'], reasoning_dict['skill']]
+                    return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
                 else:
                     return_dict['thought'] = [reasoning_dict['skill']]
 
@@ -534,7 +518,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             [False] * actions.shape[0] + [True] * (self.action_horizon - actions.shape[0])
         )
         return_dict['action_is_pad'] = action_is_pad
-        padding = np.repeat(actions[-1:], self.action_horizon - actions.shape[0], axis=0)
+        padding = np.repeat(np.zeros_like(actions[-1:]), self.action_horizon - actions.shape[0], axis=0)
         final_action = np.concatenate([actions, padding], axis=0)
 
         if freeze_action:
