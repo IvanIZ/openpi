@@ -108,6 +108,7 @@ class Pi0Fuse(Pi0):
         *,
         temperature: float = 0.,
         debug: bool = False,
+        bias = None
     ):
         """Prefill the prefix for inference. Returns KV cache and decision to think or act."""
         observation = _model.preprocess_observation(
@@ -133,7 +134,7 @@ class Pi0Fuse(Pi0):
 
         (pre_logit, _), kv_cache, intermediates = self.PaliGemma.llm(
             [prefix_token_embeddings, None], mask=prefix_attn_mask, positions=prefix_positions,
-            adarms_cond=[None, None],
+            adarms_cond=[None, None], bias=bias
         )
 
         eop_indices = prefix_positions[:, -1]

@@ -396,6 +396,7 @@ class SkillReasoningPolicy(ReasoningPolicy):
             if not hasattr(model, method_name):
                 raise ValueError(f"ReasoningPolicy requires model.{method_name}(), but it is missing.")
 
+        self._model = model # Save for debugging
         self._prefill = nnx_utils.module_jit(model.prefill, static_argnames=("temperature", "debug"))
         self._reason = nnx_utils.module_jit(
             model.reason,
@@ -484,8 +485,8 @@ class SkillReasoningPolicy(ReasoningPolicy):
         self._thought = f"{self._instruction}{self._scene_plan}"
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[override]
-        del noise  # ReasoningPolicy does not consume external diffusion noise.
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None, bias: np.ndarray | None = None) -> dict:  # type: ignore[override]
+        del noise  # SkillReasoningPolicy does not consume external diffusion noise.
 
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
@@ -498,7 +499,13 @@ class SkillReasoningPolicy(ReasoningPolicy):
 
         prefill_rng, reason_rng, action_rng, self._rng = jax.random.split(self._rng, 4)
         processed_obs, kv_cache, _, eop_logit, prefix_mask, prefix_positions, has_boa, intermediates = self._prefill(
-            prefill_rng, observation, temperature=self._temperature
+            prefill_rng, observation, temperature=self._temperature, bias=bias
+        )
+        self.prefill_info = dict(
+            prefix_mask=prefix_mask,
+            prefix_positions=prefix_positions,
+            kv_cache=kv_cache,
+            intermediates=intermediates
         )
         self.saved_intermediates = intermediates
 
