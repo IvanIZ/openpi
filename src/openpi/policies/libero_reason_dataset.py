@@ -448,7 +448,10 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             # ========== reasoning segments ==========
             reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
             end_idx = start_idx + reasoning_end_step
-            if ep_idx == 0:
+
+            INITIAL_SEGMENT_LENGTH = 10 
+
+            if idx - start_idx < INITIAL_SEGMENT_LENGTH:
                 # Learn to plan with some probability, otherwise output actions
                 if self.rdm.rand() < self.learn_reasoning_prob:
                     # some probability to learn plan generation

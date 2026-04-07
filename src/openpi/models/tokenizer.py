@@ -86,24 +86,40 @@ class FusePaligemmaTokenizer:
         if state is not None:
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
             state_str = " ".join(map(str, discretized_state))
+
             prefix = f"{prefix}; State: {state_str}"
 
-        prefix_tokens = (
-            self._tokenizer.encode(prefix, add_bos=True) +
-            [END_OF_PREFIX_TOKEN]
-        )
+        target_str = "unspecified"
+        if target is not None:
+            loc = target['image_point']
+            discretized_loc = np.digitize(loc, bins=np.linspace(0, 1, 256 + 1)[:-1]) - 1
+            target_str = " ".join(map(str, discretized_loc))
 
         # Think mode. No loss on the action. (diffusion_loss_mask)
         # LLM trained to imitate the "next thought".
         if len(thought) > 1:
             suffix = thought[1]
-            suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=True)
+            if target is not None:
+                add_eos=True
+                suffix += f"; Target: {target_str}"
+            else:
+                # Sometimes we don't have a target since the pipeline fails to parse it. This is OK -- just predict the skill
+                # and don't add EOS
+                add_eos=False
+            suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=add_eos)
             diffusion_loss_mask = np.False_
 
         # Act mode. The LLM should output <BOA>, and we grade the action.
         else:
             suffix_tokens = [BEGIN_OF_ACTION]
             diffusion_loss_mask = np.True_
+
+            prefix += f"; Target: {target_str}"
+
+        prefix_tokens = (
+            self._tokenizer.encode(prefix, add_bos=True) +
+            [END_OF_PREFIX_TOKEN]
+        )
 
         tokens = prefix_tokens + suffix_tokens
         token_mask = [True] * len(tokens)

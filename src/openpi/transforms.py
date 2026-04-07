@@ -273,11 +273,9 @@ class FuseTokenizePrompt(DataTransformFn):
     discrete_state_input: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
-        print("TOKENIZE PROMPT CALL")
-        print(data)
-        input()
         _ = data.pop("prompt", None)
         thought = data.pop("thought", None)
+        target = data.pop("target", None)
 
         if thought is None:
             raise ValueError("Thought is required for FuseTokenizePrompt")
@@ -299,7 +297,7 @@ class FuseTokenizePrompt(DataTransformFn):
             data.get('act_with_outdated_thought', False),
             data.get('think_with_outdated_thought', False),
             state=state,
-            target=data.get("target")
+            target=target
         )
 
         data.pop('act_with_outdated_thought', None)

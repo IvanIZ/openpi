@@ -94,6 +94,7 @@ class LiberoReasonInputs(LiberoInputs):
 
         if "thought" in data:
             inputs["thought"] = data["thought"]
+            inputs["target"] = data.get("target")
             inputs["act_with_outdated_thought"] = data.get("act_with_outdated_thought", False)
             inputs["think_with_outdated_thought"] = data.get("think_with_outdated_thought", False)
 
