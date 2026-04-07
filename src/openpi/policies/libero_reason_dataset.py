@@ -443,58 +443,29 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         if self.use_reasoning and self.reasoning is not None:
             episode_reasoning = self.reasoning[ep_idx]
 
-            episode_start_interval = self.reasoning[ep_idx].get('episode_start_interval', [0, 1])
             reasoning_dict = _get_thought(episode_reasoning['segments'], idx - start_idx)
 
             # ========== reasoning segments ==========
-            if reasoning_dict.get('updated_content') is not None:
-
-                # prob to use previous thought
-                reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
-                prev_reasoning_prob = self.get_prob(
-                    reasoning_dict['start_step'], reasoning_end_step, idx - start_idx
-                )
-
-                # if self.rdm.rand() < prev_reasoning_prob:
-                    # # case 1: ====== input reasoning, output reasoning ======
-                    # # case 1.1: for some probability, input outdated reasoning, output new reasoning
-                    # if self.rdm.rand() < self.updated_skill_prob:
-                    #     return_dict['thought'] = [reasoning_dict['content'], reasoning_dict['updated_content']]
-
-                    # # case 1.2: for some probability, input new reasoning, out new reasoning
-                    # else:
-                    #     return_dict['thought'] = [reasoning_dict['updated_content'], reasoning_dict['updated_content']]
-
-
-                # ############################## new reasoning format for skill reasoning v2 ###################################
+            reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
+            end_idx = start_idx + reasoning_end_step
+            if ep_idx == 0:
+                # Learn to plan with some probability, otherwise output actions
                 if self.rdm.rand() < self.learn_reasoning_prob:
-                    # case 1.1: the first segment
-                    if (idx - start_idx) < episode_start_interval[1]:
-
-                        # some probability to learn plan generation
-                        if self.rdm.rand() < self.learn_plan_generation_prob:
-                            return_dict['thought'] = [reasoning_dict['instruction'], reasoning_dict['plan']]
-                        
-                        # some probability to output updated skill
-                        else:
-                            return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['updated_skill']]
-                    
-                    # case 1.2: the non-first segment, plan always exists, output updated skill
+                    # some probability to learn plan generation
+                    if self.rdm.rand() < self.learn_plan_generation_prob:
+                        return_dict['thought'] = [episode_reasoning['instruction'], episode_reasoning['plan']]
+                    # some probability to output skill selection
                     else:
-                        return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['updated_skill']]
+                        return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
 
                 else:
                     # case 2: ====== input updated reasoning, output action ======
-                    return_dict['thought'] = [reasoning_dict['updated_skill']]
-                    if reasoning_dict['end_step'] == -1:
-                        freeze_action = True
+                    return_dict['thought'] = [reasoning_dict['skill']]
             
             
             # ========== normal acting segments ==========
             else:
                 # Cut off actions at transitions
-                reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
-                end_idx = start_idx + reasoning_end_step
                 if self.rdm.rand() < self.learn_reasoning_prob:
                     return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
                 else:
