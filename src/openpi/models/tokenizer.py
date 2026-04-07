@@ -77,6 +77,7 @@ class FusePaligemmaTokenizer:
         act_with_outdated_thought: bool,
         think_with_outdated_thought: bool,
         state: np.ndarray | None = None,
+        target: dict = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         # If thought is 2 elements, we are in think mode. (prev_thought or instruction + template, next_thought)
         # If thought is 1 element, we "want" to act. (prev_thought only)

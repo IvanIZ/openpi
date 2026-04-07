@@ -471,6 +471,9 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                 else:
                     return_dict['thought'] = [reasoning_dict['skill']]
 
+            # Can be None, without target annotations file
+            return_dict['target'] = reasoning_dict.get('target')
+
         elif self.reasoning is not None:
             return_dict['prompt'] = self.reasoning[ep_idx]['segments'][0]['content'].strip()
 
