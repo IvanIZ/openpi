@@ -456,7 +456,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                 if self.rdm.rand() < self.learn_reasoning_prob:
                     # some probability to learn plan generation
                     if self.rdm.rand() < self.learn_plan_generation_prob:
-                        return_dict['thought'] = [episode_reasoning['instruction'], episode_reasoning['plan']]
+                        return_dict['thought'] = ["Instruction: " + episode_reasoning['instruction'], episode_reasoning['plan']]
                     # some probability to output skill selection
                     else:
                         return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]

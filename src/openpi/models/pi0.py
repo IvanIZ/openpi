@@ -430,4 +430,4 @@ class Pi0(_model.BaseModel):
 
         # first fill KV cache with a forward pass of the prefix
         output_tokens, kv_cache, prefix_mask, prefix_ar_mask = self.sample_low_level_task(rng, observation, max_decoding_steps=20, temperature=0.0)
-        return (self._generate_action(noise, dt, batch_size, kv_cache, prefix_mask, batch_size), output_tokens)
+        return (self._generate_action(noise, dt, kv_cache, prefix_mask, batch_size), output_tokens)
