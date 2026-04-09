@@ -119,7 +119,6 @@ class FusePaligemmaTokenizer:
 
             if target_str:
                 prefix += f"; Target: {target_str}"
-        jax.debug.print("prefix: {prefix}", prefix=prefix)
 
         prefix_tokens = (
             self._tokenizer.encode(prefix, add_bos=True) +
