@@ -89,7 +89,7 @@ class FusePaligemmaTokenizer:
 
             prefix = f"{prefix}; State: {state_str}"
 
-        target_str = ""
+        has_target = False
         if target is not None:
             if target['location'] == "NULL":
                 target_str = "unspecified"
@@ -97,12 +97,13 @@ class FusePaligemmaTokenizer:
                 loc = target['image_point']
                 discretized_loc = np.digitize(loc, bins=np.linspace(0, 1, 256 + 1)[:-1]) - 1
                 target_str = " ".join(map(str, discretized_loc))
+                has_target = True
 
         # Think mode. No loss on the action. (diffusion_loss_mask)
         # LLM trained to imitate the "next thought".
         if len(thought) > 1:
             suffix = thought[1]
-            if target_str:
+            if has_target:
                 add_eos = True
                 suffix += f"; Target: {target_str}"
             else:

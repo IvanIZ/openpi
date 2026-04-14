@@ -451,12 +451,17 @@ class LiberoSkillReasonDataset(LeRobotDataset):
 
             INITIAL_SEGMENT_LENGTH = 10 
 
+            # Can be None, without target annotations file
+            return_dict['target'] = reasoning_dict.get('target')
+
             if idx - start_idx < INITIAL_SEGMENT_LENGTH:
                 # Learn to plan with some probability, otherwise output actions
                 if self.rdm.rand() < self.learn_reasoning_prob:
                     # some probability to learn plan generation
                     if self.rdm.rand() < self.learn_plan_generation_prob:
                         return_dict['thought'] = ["Instruction: " + episode_reasoning['instruction'], episode_reasoning['plan']]
+                        # No targets during plan generation
+                        return_dict['target'] = None
                     # some probability to output skill selection
                     else:
                         return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
@@ -473,9 +478,6 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                     return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
                 else:
                     return_dict['thought'] = [reasoning_dict['skill']]
-
-            # Can be None, without target annotations file
-            return_dict['target'] = reasoning_dict.get('target')
 
         elif self.reasoning is not None:
             return_dict['prompt'] = self.reasoning[ep_idx]['segments'][0]['content'].strip()
