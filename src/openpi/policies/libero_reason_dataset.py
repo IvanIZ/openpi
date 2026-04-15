@@ -13,6 +13,35 @@ import numpy as np
 import torch
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
+INITIAL_SEGMENT_LENGTH = 10
+TRANSITION_WIN_LENGTH = 10
+END_EPISODE_WIN = 5
+
+
+def pad_skill_horizon_actions(actions: np.ndarray, action_horizon: int) -> np.ndarray:
+    """Pad a truncated skill horizon with stationary motion and held gripper state.
+
+    LIBERO actions use 6 Cartesian delta dimensions followed by a gripper command.
+    When a sampled step is near the end of a skill segment, we want the padded tail to
+    keep the robot stationary while preserving the last gripper command.
+    """
+    if actions.ndim != 2:
+        raise ValueError(f"Expected actions to be rank-2, got shape {actions.shape}.")
+    if actions.shape[0] == 0:
+        raise ValueError("Cannot pad an empty action sequence.")
+    if action_horizon < actions.shape[0]:
+        raise ValueError(
+            f"Action horizon ({action_horizon}) is smaller than the action sequence length ({actions.shape[0]})."
+        )
+
+    pad_count = action_horizon - actions.shape[0]
+    if pad_count == 0:
+        return actions
+
+    padding = np.zeros((pad_count, actions.shape[1]), dtype=actions.dtype)
+    padding[:, -1] = actions[-1, -1]
+    return np.concatenate([actions, padding], axis=0)
+
 
 def _resolve_dataset_root(repo_id: str, reasoning_json_path: str | None) -> str | None:
     """Resolve the dataset root path for loading.
@@ -46,6 +75,23 @@ def _resolve_dataset_root(repo_id: str, reasoning_json_path: str | None) -> str 
     except Exception as e:
         logging.debug("scan_cache_dir failed: %s", e)
 
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if hub_cache is None:
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home is not None:
+            hub_cache = os.path.join(hf_home, "hub")
+        else:
+            hub_cache = os.path.expanduser("~/.cache/huggingface/hub")
+
+    repo_cache_dir = os.path.join(hub_cache, f"datasets--{repo_id.replace('/', '--')}")
+    snapshots_dir = os.path.join(repo_cache_dir, "snapshots")
+    if os.path.isdir(snapshots_dir):
+        for snapshot in sorted(os.listdir(snapshots_dir), reverse=True):
+            path = os.path.join(snapshots_dir, snapshot)
+            meta_info = os.path.join(path, "meta", "info.json")
+            if os.path.isfile(meta_info):
+                return path
+
     return candidates[0] if candidates else None
 
 
@@ -57,6 +103,88 @@ def _get_thought(thoughts: list[dict], step: int) -> dict:
         if thought['start_step'] <= step < end_step:
             return thought
     raise ValueError(f"No thought found for step {step}")
+
+
+def _get_segment_index(thoughts: list[dict], step: int) -> int:
+    for i, thought in enumerate(thoughts):
+        end_step = thought["end_step"]
+        if end_step == -1:
+            end_step = int(1e9)
+        if thought["start_step"] <= step < end_step:
+            return i
+    raise ValueError(f"No segment found for step {step}")
+
+
+def _format_done_progression(done_skills: list[str]) -> str:
+    if not done_skills:
+        return "Done: None"
+    return f"Done: {', '.join(done_skills)}"
+
+
+def _build_skill_progression(segments: list[dict], step: int, transition_win_length: int) -> str:
+    current_segment_index = _get_segment_index(segments, step)
+    if current_segment_index == 0:
+        return _format_done_progression([])
+
+    current_segment = segments[current_segment_index]
+    if step < current_segment["start_step"] + transition_win_length:
+        done_count = current_segment_index - 1
+    else:
+        done_count = current_segment_index
+
+    done_skills = [segments[i]["skill"] for i in range(max(done_count, 0))]
+    return _format_done_progression(done_skills)
+
+
+def _build_skill_prediction_prefix(plan: str, segments: list[dict], step: int, transition_win_length: int) -> str:
+    progression = _build_skill_progression(segments, step, transition_win_length)
+    return f"Plan: {plan}; {progression}"
+
+
+def _get_segment_end_step(segment: dict, default_end_step: int | None = None) -> int:
+    end_step = segment["end_step"]
+    if end_step == -1:
+        if default_end_step is not None:
+            return default_end_step
+        return int(1e9)
+    return end_step
+
+
+def _build_skill_completion_thought(
+    segments: list[dict],
+    step: int,
+    transition_win_length: int,
+    end_episode_win: int,
+    prob_predict_prev_skills: float,
+    rdm: np.random.RandomState,
+    episode_num_steps: int | None = None,
+) -> tuple[str, str]:
+    current_segment_index = _get_segment_index(segments, step)
+    current_segment = segments[current_segment_index]
+    current_skill = current_segment["skill"]
+    current_end_step = _get_segment_end_step(current_segment, episode_num_steps)
+    is_first_segment = current_segment_index == 0
+    is_last_segment = current_segment_index == len(segments) - 1
+
+    if is_first_segment and is_last_segment:
+        if step >= current_end_step - end_episode_win:
+            return current_skill, "completed"
+        return current_skill, "in-progress"
+
+    if is_first_segment:
+        return current_skill, "in-progress"
+
+    if rdm.rand() < prob_predict_prev_skills:
+        previous_segment_index = rdm.randint(0, current_segment_index)
+        return segments[previous_segment_index]["skill"], "completed"
+
+    if step < current_segment["start_step"] + transition_win_length:
+        return segments[current_segment_index - 1]["skill"], "completed"
+
+    if is_last_segment and step >= current_end_step - end_episode_win:
+        return current_skill, "completed"
+
+    return current_skill, "in-progress"
 
 
 class LiberoReasonDataset(LeRobotDataset):
@@ -320,7 +448,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             revision="main",  # bypass version-tag check (repo has no v2.1 tag)
         )
 
-        print("Using new skill reasoning dataset")
+        print("Using new skill reasoning dataset (Apr. 14)")
         self.data_config = data_config
         self.action_horizon = action_horizon
         self.action_down_sample_steps = data_config.action_down_sample_steps
@@ -329,9 +457,12 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         self.use_outdated_reasoning = data_config.use_outdated_reasoning
         self.pred_reasoning_prob = 0.7
         self.updated_skill_prob = 0.5
-        self.learn_plan_generation_prob = 0.75
-        self.learn_reasoning_prob = 0.5
+        self.learn_plan_generation_prob = 0.95
+        self.learn_reasoning_prob = 0.6
         self.is_computing_norm_stats = data_config.is_computing_norm_stats
+
+        # new params for training experiments
+        self.prob_predict_prev_skills = 0.25
 
         self.low_dim_keys = ["eef_pos", "eef_rot_axis_angle", "gripper_control"]
         self.low_dim_features = {}
@@ -429,6 +560,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         return start_prob - (start_prob - end_prob) * (now_step - start_step) / (end_step - start_step)
 
     def __getitem__(self, idx: int) -> dict:
+        # print("_getitem__ version 2 !!!!!!!!!!!")
         idx = self.indices[idx]
         return_dict = {}
         current_idx_item = self.hf_dataset[idx]
@@ -442,19 +574,18 @@ class LiberoSkillReasonDataset(LeRobotDataset):
 
         if self.use_reasoning and self.reasoning is not None:
             episode_reasoning = self.reasoning[ep_idx]
-
-            reasoning_dict = _get_thought(episode_reasoning['segments'], idx - start_idx)
+            episode_step = idx - start_idx
+            segments = episode_reasoning["segments"]
+            reasoning_dict = _get_thought(segments, episode_step)
 
             # ========== reasoning segments ==========
             reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
             end_idx = start_idx + reasoning_end_step
 
-            INITIAL_SEGMENT_LENGTH = 10 
-
             # Can be None, without target annotations file
             return_dict['target'] = reasoning_dict.get('target')
 
-            if idx - start_idx < INITIAL_SEGMENT_LENGTH:
+            if episode_step < INITIAL_SEGMENT_LENGTH:
                 # Learn to plan with some probability, otherwise output actions
                 if self.rdm.rand() < self.learn_reasoning_prob:
                     # some probability to learn plan generation
@@ -464,7 +595,17 @@ class LiberoSkillReasonDataset(LeRobotDataset):
                         return_dict['target'] = None
                     # some probability to output skill selection
                     else:
-                        return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
+                        return_dict['thought'] = list(
+                            _build_skill_completion_thought(
+                                segments,
+                                episode_step,
+                                TRANSITION_WIN_LENGTH,
+                                END_EPISODE_WIN,
+                                self.prob_predict_prev_skills,
+                                self.rdm,
+                                episode_reasoning.get("num_steps"),
+                            )
+                        )
 
                 else:
                     # case 2: ====== input updated reasoning, output action ======
@@ -475,7 +616,17 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             else:
                 # Cut off actions at transitions
                 if self.rdm.rand() < self.learn_reasoning_prob:
-                    return_dict['thought'] = [episode_reasoning['plan'], reasoning_dict['skill']]
+                    return_dict['thought'] = list(
+                        _build_skill_completion_thought(
+                            segments,
+                            episode_step,
+                            TRANSITION_WIN_LENGTH,
+                            END_EPISODE_WIN,
+                            self.prob_predict_prev_skills,
+                            self.rdm,
+                            episode_reasoning.get("num_steps"),
+                        )
+                    )
                 else:
                     return_dict['thought'] = [reasoning_dict['skill']]
 
@@ -497,8 +648,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             [False] * actions.shape[0] + [True] * (self.action_horizon - actions.shape[0])
         )
         return_dict['action_is_pad'] = action_is_pad
-        padding = np.repeat(np.zeros_like(actions[-1:]), self.action_horizon - actions.shape[0], axis=0)
-        final_action = np.concatenate([actions, padding], axis=0)
+        final_action = pad_skill_horizon_actions(actions, self.action_horizon)
 
         if freeze_action:
             return_dict['actions'] = torch.from_numpy(
@@ -519,3 +669,101 @@ class LiberoSkillReasonDataset(LeRobotDataset):
             return_dict[key] = current_idx_item[key]
 
         return return_dict
+
+
+    # # First full-finetune version backup ----------- predict skill progression [this is a backup such that edits can be made directly to __getitem__]
+    # def __getitem__(self, idx: int) -> dict:
+    #     print("_getitem__ version 1!!!!!!!!!!!")
+    #     idx = self.indices[idx]
+    #     return_dict = {}
+    #     current_idx_item = self.hf_dataset[idx]
+    #     ep_idx = current_idx_item['episode_index'].item()
+    #     start_idx = self.episode_starts[ep_idx]
+    #     end_idx = self.episode_ends[ep_idx]
+
+    #     freeze_action = False
+    #     return_dict['act_with_outdated_thought'] = False
+    #     return_dict['think_with_outdated_thought'] = False
+
+    #     if self.use_reasoning and self.reasoning is not None:
+    #         episode_reasoning = self.reasoning[ep_idx]
+    #         episode_step = idx - start_idx
+    #         segments = episode_reasoning["segments"]
+    #         reasoning_dict = _get_thought(segments, episode_step)
+    #         skill_prediction_prefix = _build_skill_prediction_prefix(
+    #             episode_reasoning["plan"],
+    #             segments,
+    #             episode_step,
+    #             TRANSITION_WIN_LENGTH,
+    #         )
+
+    #         # ========== reasoning segments ==========
+    #         reasoning_end_step = reasoning_dict['end_step'] if reasoning_dict['end_step'] != -1 else end_idx - start_idx
+    #         end_idx = start_idx + reasoning_end_step
+
+    #         if episode_step < INITIAL_SEGMENT_LENGTH:
+    #             # Learn to plan with some probability, otherwise output actions
+    #             if self.rdm.rand() < self.learn_reasoning_prob:
+    #                 # some probability to learn plan generation
+    #                 if self.rdm.rand() < self.learn_plan_generation_prob:
+    #                     return_dict['thought'] = ["Instruction: " + episode_reasoning['instruction'], episode_reasoning['plan']]
+    #                 # some probability to output skill selection
+    #                 else:
+    #                     return_dict['thought'] = [skill_prediction_prefix, reasoning_dict['skill']]
+
+    #             else:
+    #                 # case 2: ====== input updated reasoning, output action ======
+    #                 return_dict['thought'] = [reasoning_dict['skill']]
+            
+            
+    #         # ========== normal acting segments ==========
+    #         else:
+    #             # Cut off actions at transitions
+    #             if self.rdm.rand() < self.learn_reasoning_prob:
+    #                 return_dict['thought'] = [skill_prediction_prefix, reasoning_dict['skill']]
+    #             else:
+    #                 return_dict['thought'] = [reasoning_dict['skill']]
+
+    #         # Can be None, without target annotations file
+    #         return_dict['target'] = reasoning_dict.get('target')
+
+    #     elif self.reasoning is not None:
+    #         return_dict['prompt'] = self.reasoning[ep_idx]['segments'][0]['content'].strip()
+
+    #     return_dict['observation/image'] = self.hf_dataset[idx]['image']
+    #     if self.use_wrist_image:
+    #         return_dict['observation/wrist_image'] = self.hf_dataset[idx].get('wrist_image', self.hf_dataset[idx]['image'])
+
+    #     state_idx = np.array([idx])
+    #     low_dim_dict = {}
+    #     for key in self.low_dim_keys:
+    #         low_dim_dict[key] = self.low_dim_features[key][state_idx]
+
+    #     slice_end = min(end_idx, idx + (self.action_horizon - 1) * self.action_down_sample_steps + 1)
+    #     actions = self.actions[idx: slice_end: self.action_down_sample_steps]
+    #     action_is_pad = torch.tensor(
+    #         [False] * actions.shape[0] + [True] * (self.action_horizon - actions.shape[0])
+    #     )
+    #     return_dict['action_is_pad'] = action_is_pad
+    #     padding = np.repeat(np.zeros_like(actions[-1:]), self.action_horizon - actions.shape[0], axis=0)
+    #     final_action = np.concatenate([actions, padding], axis=0)
+
+    #     if freeze_action:
+    #         return_dict['actions'] = torch.from_numpy(
+    #             np.repeat(final_action[:1], self.action_horizon, axis=0).astype(np.float32)
+    #         )
+    #     else:
+    #         return_dict['actions'] = torch.from_numpy(final_action.astype(np.float32))
+
+    #     return_dict['observation/state'] = torch.from_numpy(
+    #         np.concatenate([
+    #             low_dim_dict['eef_pos'].flatten(),
+    #             low_dim_dict['eef_rot_axis_angle'].flatten(),
+    #             low_dim_dict['gripper_control'].flatten()
+    #         ], axis=-1).astype(np.float32)
+    #     )
+
+    #     for key in ['timestamp', 'frame_index', 'episode_index', 'index', 'task_index']:
+    #         return_dict[key] = current_idx_item[key]
+
+    #     return return_dict
