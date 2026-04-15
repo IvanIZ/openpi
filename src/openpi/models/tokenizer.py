@@ -90,6 +90,7 @@ class FusePaligemmaTokenizer:
             prefix = f"{prefix}; State: {state_str}"
 
         has_target = False
+        target_str = None
         if target is not None:
             if target['location'] == "NULL":
                 target_str = "unspecified"
@@ -118,7 +119,7 @@ class FusePaligemmaTokenizer:
             suffix_tokens = [BEGIN_OF_ACTION]
             diffusion_loss_mask = np.True_
 
-            if target_str:
+            if target_str is not None:
                 prefix += f"; Target: {target_str}"
 
         prefix_tokens = (
