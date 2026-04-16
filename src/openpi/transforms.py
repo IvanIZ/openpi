@@ -245,6 +245,52 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class ExtractThoughts(DataTransformFn):
+    tokenizer: _tokenizer.AtomicPaligemmaTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "tokenized_suffix" not in data:
+            return data
+        tokens = data["tokenized_suffix"]
+        thoughts = self.tokenizer.extract_thoughts(tokens)
+        return {**data, "thoughts": thoughts}
+
+
+@dataclasses.dataclass(frozen=True)
+class AtomicTokenizePrompt(DataTransformFn):
+    tokenizer: _tokenizer.AtomicPaligemmaTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        prompt = data.pop("prompt", None)
+        in_prompt = prompt
+        thought = data.pop("thought", None)
+        if thought is not None:
+            thought[0] = in_prompt
+        else:
+            thought = [in_prompt]
+
+        if thought is None:
+            raise ValueError("Thought is required")
+        (
+            tokens,
+            token_mask,
+            ar_mask,
+            text_loss_mask,
+            diffusion_loss_mask,
+            atomic_token,
+        ) = self.tokenizer.tokenize(thought)
+
+        return {
+            **data,
+            "tokenized_prompt": tokens,
+            "tokenized_prompt_mask": token_mask,
+            "token_ar_mask": ar_mask,
+            "token_loss_mask": text_loss_mask,
+            "diffusion_loss_mask": diffusion_loss_mask,
+            "atomic_token": atomic_token,
+        }
+
+@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False

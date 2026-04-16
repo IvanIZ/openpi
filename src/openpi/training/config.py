@@ -104,6 +104,15 @@ class DataConfig:
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
 
 
+@dataclasses.dataclass(frozen=True)
+class AtomicDataConfig(DataConfig):
+    """Extended DataConfig for Atomic datasets with reasoning support."""
+    seed: int = 42
+    use_reasoning: bool = True
+    reasoning_json_path: str | None = None
+    use_outdated_reasoning: bool = True
+
+
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         """Create a group."""
@@ -179,6 +188,90 @@ class ModelTransformFactory(GroupFactory):
                     ],
                 )
 
+
+@dataclasses.dataclass(frozen=True)
+class AtomicModelTransformFactory(GroupFactory):
+    """Creates model transforms for standard pi0 models."""
+
+    # If provided, will determine the default prompt that be used by the model.
+    default_prompt: str | None = None
+
+    def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
+        match model_config.model_type:
+            case _model.ModelType.PI0:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.AtomicTokenizePrompt(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
+                    ],
+                    outputs=[
+                        _transforms.ExtractThoughts(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                    ]
+                )
+            case _model.ModelType.PI0_ATOMIC:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.AtomicTokenizePrompt(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
+                    ],
+                    outputs=[
+                        _transforms.ExtractThoughts(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                    ]
+                )
+            case _model.ModelType.PI05:
+                assert isinstance(model_config, pi0_config.Pi0AtomicConfig)
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.AtomicTokenizePrompt(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
+                    ],
+                    outputs=[
+                        _transforms.ExtractThoughts(
+                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                    ]
+                )
+            case _model.ModelType.PI0_FAST:
+                tokenizer_cls = (
+                    _tokenizer.FASTTokenizer
+                    if model_config.fast_model_tokenizer is None
+                    else model_config.fast_model_tokenizer
+                )
+                tokenizer_kwargs = (
+                    {} if model_config.fast_model_tokenizer_kwargs is None else model_config.fast_model_tokenizer_kwargs
+                )
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeFASTInputs(
+                            tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
+                        ),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTActions(
+                            tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
+                            action_horizon=model_config.action_horizon,
+                            action_dim=model_config.action_dim,
+                        )
+                    ],
+                )
 
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
@@ -442,6 +535,43 @@ class LeRobotLiberoReasonDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAtomicDataConfig(DataConfigFactory):
+    extra_delta_transform: bool = False
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                        "thought": "thought",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+        # Use delta actions (not for gripper)
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = AtomicModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
 
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
@@ -1378,6 +1508,29 @@ _CONFIGS = [
         wandb_enabled=True,
         save_interval=500,
         keep_period=1_000,
+    ),
+    TrainConfig(
+        name="Atomic_libero",
+        model=pi0_config.Pi0AtomicConfig(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotAtomicDataConfig(
+            repo_id="libero_lerobot",
+            base_config=AtomicDataConfig(
+                prompt_from_task=True,
+                use_reasoning=True,
+                reasoning_json_path="data_split_json/output_report_test.json",
+            ),
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=140_000,
     ),
 ]
 

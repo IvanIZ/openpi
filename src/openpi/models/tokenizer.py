@@ -55,6 +55,98 @@ BEGIN_OF_REASONING = 257020
 PALIGEMMA_EOS_TOKEN = 1
 
 
+def embed_sigma(x: str) -> float:
+    """Maps atomic skill name to a numerical token index."""
+    sigma_map = {
+        "pick": 0.0,
+        "place": 1.0,
+        "open": 2.0,
+        "close": 3.0,
+        "turn": 4.0,
+    }
+    return sigma_map.get(x, 0.0)
+
+
+class AtomicPaligemmaTokenizer:
+    def __init__(self, max_len: int = 48):
+        self._max_len = max_len
+
+        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        with path.open("rb") as f:
+            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+
+    def tokenize(self,
+                 thought: list[str],
+                 ) -> tuple[np.ndarray, np.ndarray,
+                            np.ndarray, np.ndarray, np.ndarray]:
+        prefix = thought[0] #+ "; First decide whether to think or act."
+        last_word = thought[0].rsplit(None, 1)[0] if thought[0].strip() else ""
+        atomic_token = embed_sigma(last_word)
+        prefix_tokens = (
+            self._tokenizer.encode(prefix, add_bos=True) +
+            [END_OF_PREFIX_TOKEN]
+        )
+        
+
+        if len(thought) > 1:
+            word_count = len(thought[1].split())
+            if word_count ==1:
+                last_word = thought[1].rsplit(None, 1)[-1] if thought[1].strip() else ""
+                atomic_token = embed_sigma(last_word)
+                suffix_tokens = [BEGIN_OF_ACTION]
+                diffusion_loss_mask = np.True_
+            else:
+                suffix = thought[1]
+                last_word = thought[1].rsplit(None, 1)[-1] if thought[1].strip() else ""
+                atomic_token = embed_sigma(last_word)
+                suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=True)
+                diffusion_loss_mask = np.True_
+        else:
+            suffix_tokens = [BEGIN_OF_ACTION]
+            diffusion_loss_mask = np.True_
+        tokens = prefix_tokens + suffix_tokens
+        token_mask = [True] * len(tokens)
+        ar_mask = [0] * len(prefix_tokens) + [1] * len(suffix_tokens)
+        text_loss_mask = [False] * len(prefix_tokens) + [True] * len(suffix_tokens)
+
+        # Pad tokens to max length
+        tokens_len = len(tokens)
+        if tokens_len < self._max_len:
+            padding = [False] * (self._max_len - tokens_len)
+            tokens = tokens + padding
+            token_mask = token_mask + padding
+            ar_mask = ar_mask + padding
+            text_loss_mask = text_loss_mask + padding
+        else:
+            if len(tokens) > self._max_len:
+                logging.warning(
+                    f"Token length ({len(tokens)}) exceeds max length ({self._max_len}), truncating. "
+                    "Consider increasing the `max_token_len` in your model config if this happens frequently."
+                )
+            tokens = tokens[: self._max_len]
+            token_mask = token_mask[: self._max_len]
+            ar_mask = ar_mask[: self._max_len]
+            text_loss_mask = text_loss_mask[: self._max_len]
+        
+        return (
+            np.asarray(tokens),
+            np.asarray(token_mask),
+            np.asarray(ar_mask),
+            np.asarray(text_loss_mask),
+            diffusion_loss_mask,
+            np.asarray(atomic_token)
+        )
+    def extract_thoughts(self, tokens: np.ndarray) -> str:
+        tokens = tokens.tolist()
+        filtered_tokens = []
+        # skip the first token, which is the BOA/BOT token
+        for t in tokens[1:]:
+            filtered_tokens.append(t)
+            if t == PALIGEMMA_EOS_TOKEN:
+                break
+        return self._tokenizer.decode(filtered_tokens)
+
+
 class FusePaligemmaTokenizer:
     """Tokenizer for models with joint text reasoning and action generation.
 

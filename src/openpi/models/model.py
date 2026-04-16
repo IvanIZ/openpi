@@ -165,6 +165,34 @@ class FuseObservation(Observation):
         )
 
 
+@at.typecheck
+@struct.dataclass
+class AtomicObservation(Observation):
+    """Observation for the pi0_atomic model with atomic skill conditioning."""
+
+    diffusion_loss_mask: at.Bool[ArrayT, "*b"] | None = None
+    atomic_token: at.Float[ArrayT, "*b"] | None = None
+
+    @classmethod
+    def from_dict(cls, data: at.PyTree[ArrayT]) -> "AtomicObservation[ArrayT]":
+        if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
+            raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
+        for key in data["image"]:
+            if data["image"][key].dtype == np.uint8:
+                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+        return cls(
+            images=data["image"],
+            image_masks=data["image_mask"],
+            state=data["state"],
+            tokenized_prompt=data.get("tokenized_prompt"),
+            tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
+            token_ar_mask=data.get("token_ar_mask"),
+            token_loss_mask=data.get("token_loss_mask"),
+            diffusion_loss_mask=data.get("diffusion_loss_mask"),
+            atomic_token=data.get("atomic_token"),
+        )
+
+
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
 Actions = at.Float[ArrayT, "*b ah ad"]

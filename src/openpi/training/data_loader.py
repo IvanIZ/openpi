@@ -15,6 +15,7 @@ import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
+import openpi.policies.atomic_dataset as atomic_dataset 
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -146,12 +147,25 @@ def create_torch_dataset(
         return LiberoSkillReasonDataset(data_config, action_horizon)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-    )
+    
+    if isinstance(data_config, _config.AtomicDataConfig):
+        print("Data Loader Info: using Atomic_Dataset...")
+        dataset = atomic_dataset.Atomic_Dataset(
+            data_config,
+            model_config.action_horizon,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
+
+    else:
+        print("Data Loader Info: using default LeRobotDataset...")
+        dataset = lerobot_dataset.LeRobotDataset(
+            data_config.repo_id,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
