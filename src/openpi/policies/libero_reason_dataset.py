@@ -150,6 +150,51 @@ def _get_segment_end_step(segment: dict, default_end_step: int | None = None) ->
     return end_step
 
 
+# def _build_skill_completion_thought(
+#     segments: list[dict],
+#     step: int,
+#     transition_win_length: int,
+#     end_episode_win: int,
+#     prob_predict_prev_skills: float,
+#     rdm: np.random.RandomState,
+#     episode_num_steps: int | None = None,
+# ) -> tuple[str, str]:
+#     current_segment_index = _get_segment_index(segments, step)
+#     current_segment = segments[current_segment_index]
+#     current_skill = current_segment["skill"]
+#     current_end_step = _get_segment_end_step(current_segment, episode_num_steps)
+#     is_first_segment = current_segment_index == 0
+#     is_last_segment = current_segment_index == len(segments) - 1
+#     plan_text = " ".join(f"{i + 1}. {segment['skill']}" for i, segment in enumerate(segments))
+
+#     selected_segment_index = current_segment_index
+#     selected_skill = current_skill
+#     completion_label = "in-progress"
+
+#     if is_first_segment and is_last_segment:
+#         if step >= current_end_step - end_episode_win:
+#             completion_label = "completed"
+            
+#     elif is_first_segment:
+#         completion_label = "in-progress"
+
+#     elif rdm.rand() < prob_predict_prev_skills:
+#         selected_segment_index = rdm.randint(0, current_segment_index)
+#         selected_skill = segments[selected_segment_index]["skill"]
+#         completion_label = "completed"
+
+#     elif step < current_segment["start_step"] + transition_win_length:
+#         selected_segment_index = current_segment_index - 1
+#         selected_skill = segments[selected_segment_index]["skill"]
+#         completion_label = "completed"
+        
+#     elif is_last_segment and step >= current_end_step - end_episode_win:
+#         completion_label = "completed"
+
+#     prefix = f"Plan: {plan_text}; Current skill: {selected_segment_index + 1}. {selected_skill}"
+#     return prefix, completion_label
+
+
 def _build_skill_completion_thought(
     segments: list[dict],
     step: int,
@@ -458,11 +503,12 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         self.pred_reasoning_prob = 0.7
         self.updated_skill_prob = 0.5
         self.learn_plan_generation_prob = 0.95
-        self.learn_reasoning_prob = 0.6
+        self.learn_reasoning_prob = 0.5
         self.is_computing_norm_stats = data_config.is_computing_norm_stats
 
         # new params for training experiments
-        self.prob_predict_prev_skills = 0.25
+        self.prob_predict_prev_skills = 0.0     # disable this in v3
+        print("self.prob_predict_prev_skills---> ", self.prob_predict_prev_skills, self.learn_reasoning_prob)
 
         self.low_dim_keys = ["eef_pos", "eef_rot_axis_angle", "gripper_control"]
         self.low_dim_features = {}
