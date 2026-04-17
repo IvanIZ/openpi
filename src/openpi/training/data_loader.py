@@ -145,6 +145,10 @@ def create_torch_dataset(
     if isinstance(data_config, _config.LiberoSkillReasonDataConfig):
         from openpi.policies.libero_reason_dataset import LiberoSkillReasonDataset
         return LiberoSkillReasonDataset(data_config, action_horizon)
+    
+    if isinstance(data_config, _config.CalvinDataConfig):
+        from openpi.policies.calvin_dataset import CalvinDataset
+        return CalvinDataset(data_config, action_horizon)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     
