@@ -71,6 +71,8 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Local repo path, if we don't want to use huggingface cache
+    repo_path: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -394,7 +396,6 @@ class CalvinDataConfig(DataConfig):
     getitem_type: str = "necessary"
     use_wrist_image: bool = True
     is_computing_norm_stats: bool = False
-    repo_path: str | None = None
     use_val_dataset: bool = True
     val_ratio: float = 0.0
     create_train_val_split: bool = False
@@ -973,7 +974,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_libero",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=15, discrete_state_input=True),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
@@ -991,6 +992,31 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    # Libero 100 (libero_10 + libero_90), yilin wu edition
+    TrainConfig(
+        name="pi05_libero_100",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=DataConfig(
+                repo_path=REPO_ROOT/"data/libero-100",
+                prompt_from_task=True
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=60_000, # NOTE: doubled train steps, halved batch size compared to ninghan's FFT runs.
     ),
     #
     # Fine-tuning Aloha configs.
