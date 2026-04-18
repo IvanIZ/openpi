@@ -45,7 +45,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        data = self._packer.pack(obs)
+        data = self._packer.pack({"obs": obs, "method": "infer"})
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
@@ -53,6 +53,21 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
 
+    def initialize(self, obs: Dict, task: str) -> None:
+        data = self._packer.pack({"obs": obs, 'task': task, "method": "initialize"})
+        self._ws.send(data)
+        # TODO: status
+        response = self._ws.recv()
+        if isinstance(response, str):
+            # we're expecting bytes; if the server sends a string, it's an error.
+            raise RuntimeError(f"Error in inference server:\n{response}")
+
     @override
     def reset(self) -> None:
-        pass
+        data = self._packer.pack({"method": "reset"})
+        self._ws.send(data)
+        # TODO: status
+        response = self._ws.recv()
+        if isinstance(response, str):
+            # we're expecting bytes; if the server sends a string, it's an error.
+            raise RuntimeError(f"Error in inference server:\n{response}")

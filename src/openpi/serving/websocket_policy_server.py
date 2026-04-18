@@ -55,10 +55,31 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                request = msgpack_numpy.unpackb(await websocket.recv())
+                method = request['method']
+                if method == "reset":
+                    logger.info("Resetting")
+                    policy.reset()
+                    await websocket.send(packer.pack({"status": "ok"}))
+                    continue
+                elif method == "initialize":
+                    if hasattr(policy, "initialize"):
+                        logger.info("Initializing policy")
+                        policy.initialize(request['obs'], request['task'])
+                        await websocket.send(packer.pack({"status": "ok"}))
+                    else:
+                        err_msg = "Got initialize request but policy has no initialize routine!"
+                        logger.warning(err_msg)
+                        await websocket.send(packer.pack({"status": "warn"}))
+                    continue
+                elif method != "infer":
+                    err_msg = f"Unrecognized method type: {method}"
+                    logger.error(err_msg)
+                    await websocket.send(err_msg)
+                    continue
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                action = self._policy.infer(request['obs'])
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {

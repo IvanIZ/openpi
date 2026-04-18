@@ -428,7 +428,12 @@ class SkillReasoningPolicy(ReasoningPolicy):
         self._lock = threading.Lock()
         self._is_thinking = False
 
+    # TODO: deprecate
+    # Blame Jing-Chen for not knowing about BasePolicy reset()
     def start(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
         """Reset rollout-local reasoning state."""
         self._scene_plan = self._initial_scene_plan
         self._instruction = None
