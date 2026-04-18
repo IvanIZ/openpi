@@ -59,13 +59,13 @@ class WebsocketPolicyServer:
                 method = request['method']
                 if method == "reset":
                     logger.info("Resetting")
-                    policy.reset()
+                    self._policy.reset()
                     await websocket.send(packer.pack({"status": "ok"}))
                     continue
                 elif method == "initialize":
-                    if hasattr(policy, "initialize"):
+                    if hasattr(self._policy, "initialize"):
                         logger.info("Initializing policy")
-                        policy.initialize(request['obs'], request['task'])
+                        self._policy.initialize(request['obs'], request['task'])
                         await websocket.send(packer.pack({"status": "ok"}))
                     else:
                         err_msg = "Got initialize request but policy has no initialize routine!"
