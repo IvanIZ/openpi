@@ -216,22 +216,6 @@ class AtomicModelTransformFactory(GroupFactory):
                         ),
                     ]
                 )
-            case _model.ModelType.PI0_ATOMIC:
-                return _transforms.Group(
-                    inputs=[
-                        _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
-                        _transforms.AtomicTokenizePrompt(
-                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
-                        ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
-                    ],
-                    outputs=[
-                        _transforms.ExtractThoughts(
-                            _tokenizer.AtomicPaligemmaTokenizer(model_config.max_token_len),
-                        ),
-                    ]
-                )
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0AtomicConfig)
                 return _transforms.Group(
@@ -443,7 +427,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
         )
 
@@ -572,7 +556,7 @@ class LeRobotAtomicDataConfig(DataConfigFactory):
             ]
         )
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
         )
         # Use delta actions (not for gripper)
@@ -1552,13 +1536,15 @@ _CONFIGS = [
         name="Atomic_libero",
         model=pi0_config.Pi0AtomicConfig(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotAtomicDataConfig(
-            repo_id="libero_lerobot",
+            repo_id="yilin-wu/libero-100",
             base_config=AtomicDataConfig(
-                prompt_from_task=True,
+                prompt_from_task=False,
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100",
                 use_reasoning=True,
-                reasoning_json_path="data_split_json/output_report_test.json",
+                reasoning_json_path=REPO_ROOT / "data/libero-100/skill_annotations.json",
             ),
         ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
@@ -1570,6 +1556,7 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=140_000,
+        keep_period=10_000,
     ),
     TrainConfig(
         name="pi05_calvin",

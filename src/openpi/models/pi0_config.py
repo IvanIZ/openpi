@@ -72,6 +72,7 @@ class Pi0AtomicConfig(_model.BaseModelConfig):
                 token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
                 diffusion_loss_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_),
+                atomic_token=jax.ShapeDtypeStruct([batch_size], jnp.float32),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

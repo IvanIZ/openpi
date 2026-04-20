@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import jax
 import numpy as np
@@ -53,18 +54,54 @@ END_OF_PREFIX_TOKEN = 257022
 BEGIN_OF_ACTION = 257021
 BEGIN_OF_REASONING = 257020
 PALIGEMMA_EOS_TOKEN = 1
+_SKILL_TOKEN_RE = re.compile(
+    r"(PICKUP_FROM|PLACE_ON|PLACE_IN|OPEN|CLOSE|TURN_ON|TURN_OFF|PICK|PLACE|TURN)\b(?:\([^)]*\))?",
+    re.IGNORECASE,
+)
+
+
+# def embed_sigma(x: str) -> float:
+#     """Maps atomic skill name to a numerical token index."""
+#     sigma_map = {
+#         "pick": 0.0,
+#         "place": 1.0,
+#         "open": 2.0,
+#         "close": 3.0,
+#         "turn": 4.0,
+#     }
+#     return sigma_map.get(x, 0.0)
+
+
+def normalize_atomic_skill_name(text: str) -> str:
+    """Extract and canonicalize a skill name from AtomicVLA prompt text."""
+    if not text:
+        return ""
+
+    match = _SKILL_TOKEN_RE.search(text.strip())
+    if match is None:
+        return text.strip().upper().split("(", 1)[0]
+
+    skill = match.group(1).upper()
+    legacy_map = {
+        "PICK": "PICKUP_FROM",
+        "PLACE": "PLACE_ON",
+        "TURN": "TURN_ON",
+    }
+    return legacy_map.get(skill, skill)
 
 
 def embed_sigma(x: str) -> float:
-    """Maps atomic skill name to a numerical token index."""
+    """Maps canonical skill names onto the five AtomicVLA experts."""
     sigma_map = {
-        "pick": 0.0,
-        "place": 1.0,
-        "open": 2.0,
-        "close": 3.0,
-        "turn": 4.0,
+        "PICKUP_FROM": 0.0,
+        "PLACE_ON": 1.0,
+        "PLACE_IN": 1.0,
+        "OPEN": 2.0,
+        "CLOSE": 3.0,
+        "TURN_ON": 4.0,
+        "TURN_OFF": 4.0,
     }
-    return sigma_map.get(x, 0.0)
+    return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
 
 
 class AtomicPaligemmaTokenizer:
@@ -79,9 +116,8 @@ class AtomicPaligemmaTokenizer:
                  thought: list[str],
                  ) -> tuple[np.ndarray, np.ndarray,
                             np.ndarray, np.ndarray, np.ndarray]:
-        prefix = thought[0] #+ "; First decide whether to think or act."
-        last_word = thought[0].rsplit(None, 1)[0] if thought[0].strip() else ""
-        atomic_token = embed_sigma(last_word)
+        prefix = thought[0]
+        atomic_token = embed_sigma(thought[-1] if thought else "")
         prefix_tokens = (
             self._tokenizer.encode(prefix, add_bos=True) +
             [END_OF_PREFIX_TOKEN]
@@ -91,14 +127,12 @@ class AtomicPaligemmaTokenizer:
         if len(thought) > 1:
             word_count = len(thought[1].split())
             if word_count ==1:
-                last_word = thought[1].rsplit(None, 1)[-1] if thought[1].strip() else ""
-                atomic_token = embed_sigma(last_word)
+                atomic_token = embed_sigma(thought[1])
                 suffix_tokens = [BEGIN_OF_ACTION]
                 diffusion_loss_mask = np.True_
             else:
                 suffix = thought[1]
-                last_word = thought[1].rsplit(None, 1)[-1] if thought[1].strip() else ""
-                atomic_token = embed_sigma(last_word)
+                atomic_token = embed_sigma(suffix)
                 suffix_tokens = [BEGIN_OF_REASONING] + self._tokenizer.encode(suffix, add_eos=True)
                 diffusion_loss_mask = np.True_
         else:

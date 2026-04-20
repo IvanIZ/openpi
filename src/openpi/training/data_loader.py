@@ -150,7 +150,11 @@ def create_torch_dataset(
         from openpi.policies.calvin_dataset import CalvinDataset
         return CalvinDataset(data_config, action_horizon)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.repo_path)
+    dataset_meta_root = data_config.repo_path
+    if isinstance(data_config, _config.AtomicDataConfig):
+        dataset_meta_root = atomic_dataset.resolve_dataset_root(repo_id, data_config.repo_path) or data_config.repo_path
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=dataset_meta_root)
     
     if isinstance(data_config, _config.AtomicDataConfig):
         print("Data Loader Info: using Atomic_Dataset...")
@@ -559,13 +563,16 @@ class DataLoaderImpl(DataLoader):
         self._data_config = data_config
         self._data_loader = data_loader
         self._use_fuse_observation = isinstance(data_config, _config.LiberoReasonDataConfig)
+        self._use_atomic_observation = isinstance(data_config, _config.AtomicDataConfig)
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
     def __iter__(self):
         for batch in self._data_loader:
-            if self._use_fuse_observation or "diffusion_loss_mask" in batch:
+            if self._use_atomic_observation or "atomic_token" in batch:
+                yield _model.AtomicObservation.from_dict(batch), batch["actions"]
+            elif self._use_fuse_observation or "diffusion_loss_mask" in batch:
                 yield _model.FuseObservation.from_dict(batch), batch["actions"]
             else:
                 yield _model.Observation.from_dict(batch), batch["actions"]
