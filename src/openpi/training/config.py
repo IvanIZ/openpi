@@ -985,11 +985,12 @@ _CONFIGS = [
             repo_id="yilin-wu/libero-100",
             base_config=DataConfig(
                 repo_path=REPO_ROOT/"data/libero-100",
+                # repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
                 prompt_from_task=True
             ),
             extra_delta_transform=False,
         ),
-        batch_size=32,
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
@@ -1000,7 +1001,8 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=60_000, # NOTE: doubled train steps, halved batch size compared to ninghan's FFT runs.
+        num_train_steps=100_000,        # match AtomicVLA
+        keep_period=10_000,
     ),
     #
     # Fine-tuning Aloha configs.
