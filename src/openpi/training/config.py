@@ -1593,8 +1593,6 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         wandb_enabled=True,
-        save_interval=500,
-        keep_period=1_000,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         #num_train_steps=30_000,
         num_train_steps=100_000,     # Bumping it up to atomicVLA setting. We will train everything at 100k
