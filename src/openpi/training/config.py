@@ -1564,8 +1564,8 @@ _CONFIGS = [
         name="pi05_calvin",
         model=pi0_fuse.Pi0FuseConfig(
             pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
             action_dim=32,
             action_horizon=16,
             max_token_len=415,
@@ -1578,14 +1578,11 @@ _CONFIGS = [
                 repo_path=REPO_ROOT/"data/calvin-task-ABC-D-lerobot"
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         freeze_filter=pi0_fuse.Pi0FuseConfig(
             pi05=True,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
         ).get_freeze_filter(),
-        ema_decay=None,
-        num_train_steps=30_000,     # 10_600 steps with 64 bs = 1 full pass
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
@@ -1593,9 +1590,15 @@ _CONFIGS = [
             decay_steps=30_000,
             decay_lr=5e-6,
         ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
         wandb_enabled=True,
         save_interval=500,
         keep_period=1_000,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        #num_train_steps=30_000,
+        num_train_steps=100_000,     # Bumping it up to atomicVLA setting. We will train everything at 100k
+        keep_period=10_000
     ),
 ]
 
