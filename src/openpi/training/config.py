@@ -1567,8 +1567,8 @@ _CONFIGS = [
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
             action_dim=32,
-            action_horizon=16,
-            max_token_len=415,
+            action_horizon=10,
+            max_token_len=256,
             diffusion_loss_coeff=1.0,
         ),
         data=LeRobotLiberoReasonDataConfig(
