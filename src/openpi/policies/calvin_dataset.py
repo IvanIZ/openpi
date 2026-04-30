@@ -8,6 +8,14 @@ import torch
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
+from openpi.policies.atomic_dataset import INITIAL_SEGMENT_LENGTH
+from openpi.policies.atomic_dataset import TRANSITION_WINDOW_LENGTH
+from openpi.policies.atomic_dataset import _get_segment_index
+from openpi.policies.atomic_dataset import _get_thought
+from openpi.policies.atomic_dataset import _normalize_segment_end
+from openpi.policies.atomic_dataset import _segment_skill_name
+
+
 def _resolve_dataset_root(repo_id: str, repo_path: str | None) -> str | None:
     """Resolve the dataset root path for loading.
 
@@ -65,7 +73,7 @@ class CalvinDataset(LeRobotDataset):
         states = torch.stack(self.hf_dataset['observation.state']).numpy().astype(np.float32)
         self.low_dim_features['eef_pos'] = states[:, :3]
         self.low_dim_features['eef_rot_axis_angle'] = states[:, 3:6]
-        self.low_dim_features['gripper_control'] = states[:, 6:]
+        self.low_dim_features['gripper_control'] = states[:, 6:7]
         self.actions = torch.stack(self.hf_dataset['action']).numpy().astype(np.float32)
 
         episode_indices = np.array(self.hf_dataset['episode_index'])
@@ -134,4 +142,95 @@ class CalvinDataset(LeRobotDataset):
                 self.low_dim_features['gripper_control'][idx].flatten()
             ], axis=-1).astype(np.float32)
         )
+        return return_dict
+
+
+class AtomicCalvinDataset(CalvinDataset):
+    """CALVIN LeRobot dataset with AtomicVLA skill-reasoning annotations."""
+
+    def __init__(self, data_config, action_horizon: int):
+        super().__init__(data_config, action_horizon)
+
+        self.use_reasoning = data_config.use_reasoning
+        self.reasoning_json_path = data_config.reasoning_json_path
+        self.reasoning = None
+        if self.reasoning_json_path is not None:
+            with open(self.reasoning_json_path, "r") as f:
+                loaded = json.load(f)
+            self.reasoning = {}
+            for key, value in loaded.items():
+                if key.isdigit():
+                    self.reasoning[int(key)] = value
+                else:
+                    self.reasoning[key] = value
+
+    def __getitem__(self, raw_idx: int) -> dict:
+        idx = self.indices[raw_idx]
+        return_dict = {}
+        current_item = self.hf_dataset[idx]
+        ep_idx = int(current_item["episode_index"].item())
+        start_idx = self.episode_starts[ep_idx]
+        end_idx = self.episode_ends[ep_idx]
+        task_nl = self.episode_info[ep_idx]["task_nl"]
+
+        return_dict["image"] = current_item["observation.images.top"]
+        if self.use_wrist_image:
+            return_dict["wrist_image"] = current_item["observation.images.wrist"]
+
+        slice_end = min(end_idx, idx + (self.action_horizon - 1) * self.action_down_sample_steps + 1)
+        actions = self.actions[idx: slice_end: self.action_down_sample_steps]
+        action_is_pad = torch.tensor(
+            [False] * actions.shape[0] + [True] * (self.action_horizon - actions.shape[0])
+        )
+        return_dict["actions_is_pad"] = action_is_pad
+        padding = np.repeat(actions[-1:], self.action_horizon - actions.shape[0], axis=0)
+        final_action = np.concatenate([actions, padding], axis=0)
+        return_dict["actions"] = torch.from_numpy(final_action.astype(np.float32))
+
+        return_dict["state"] = torch.from_numpy(
+            np.concatenate([
+                self.low_dim_features["eef_pos"][idx].flatten(),
+                self.low_dim_features["eef_rot_axis_angle"][idx].flatten(),
+                self.low_dim_features["gripper_control"][idx].flatten()
+            ], axis=-1).astype(np.float32)
+        )
+
+        if self.use_reasoning and self.reasoning is not None:
+            if ep_idx not in self.reasoning:
+                raise ValueError(f"No AtomicVLA reasoning found for CALVIN episode {ep_idx}")
+
+            episode_reasoning = self.reasoning[ep_idx]
+            reasonings = episode_reasoning["segments"]
+            episode_step = int(idx - start_idx)
+
+            reasoning_dict = _get_thought(reasonings, episode_step, ep_idx)
+            segment_index = _get_segment_index(reasonings, episode_step, ep_idx)
+
+            instruction = episode_reasoning.get("instruction", task_nl)
+            current_skill = _segment_skill_name(reasoning_dict)
+            next_skill = None
+            if segment_index + 1 < len(reasonings):
+                next_skill = _segment_skill_name(reasonings[segment_index + 1])
+
+            if episode_step <= INITIAL_SEGMENT_LENGTH:
+                thought = f"Lets begin, the atomic skill is {current_skill}"
+            elif (
+                next_skill is not None
+                and _normalize_segment_end(reasoning_dict["end_step"]) - episode_step <= TRANSITION_WINDOW_LENGTH
+            ):
+                thought = f"Planning new skill, the atomic skill is {next_skill}"
+            elif (
+                episode_step - int(reasoning_dict["start_step"]) <= TRANSITION_WINDOW_LENGTH
+                and int(reasoning_dict["start_step"]) != 0
+            ):
+                thought = f"Planning new skill, the atomic skill is {current_skill}"
+            else:
+                thought = current_skill
+
+            return_dict["prompt"] = instruction
+            return_dict["thought"] = [instruction, thought]
+        else:
+            return_dict["prompt"] = task_nl
+            return_dict["thought"] = [task_nl]
+
         return return_dict

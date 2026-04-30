@@ -386,6 +386,20 @@ class CalvinDataConfig(DataConfig):
     seed: int = 42
     norm_stats_dir: str = ""
 
+
+@dataclasses.dataclass(frozen=True)
+class AtomicCalvinDataConfig(AtomicDataConfig):
+    """Extended data config for AtomicVLA training on CALVIN annotations."""
+    action_down_sample_steps: int = 1
+    getitem_type: str = "necessary"
+    use_wrist_image: bool = True
+    is_computing_norm_stats: bool = False
+    use_val_dataset: bool = True
+    val_ratio: float = 0.0
+    create_train_val_split: bool = False
+    norm_stats_dir: str = ""
+
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
     """
@@ -1558,6 +1572,37 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=140_000,
+        keep_period=10_000,
+    ),
+    TrainConfig(
+        name="atomic_calvin",
+        model=pi0_config.Pi0AtomicConfig(
+            pi05=True,
+            action_expert_variant="moe_gemma_8",
+            action_horizon=10,
+            discrete_state_input=False,
+        ),
+        data=LeRobotAtomicDataConfig(
+            repo_id="fywang/calvin-task-ABC-D-lerobot",
+            base_config=AtomicCalvinDataConfig(
+                prompt_from_task=False,
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--fywang--calvin-task-ABC-D-lerobot/snapshots/b3d4ef71226a5fb359f05eeb7036c3caafc3a3c1",
+                use_reasoning=True,
+                reasoning_json_path=REPO_ROOT / "data/calvin-task-ABC-D-lerobot/skill_annotations_calvin.json",
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=130_000,
         keep_period=10_000,
     ),
     TrainConfig(

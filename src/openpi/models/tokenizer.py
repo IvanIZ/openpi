@@ -55,7 +55,8 @@ BEGIN_OF_ACTION = 257021
 BEGIN_OF_REASONING = 257020
 PALIGEMMA_EOS_TOKEN = 1
 _SKILL_TOKEN_RE = re.compile(
-    r"(PICKUP_FROM|PLACE_ON|PLACE_IN|OPEN|CLOSE|TURN_ON|TURN_OFF|PICK|PLACE|TURN)\b(?:\([^)]*\))?",
+    r"(PLACE_ON|PLACE_IN|PICKUP_FROM|OPEN|CLOSE|TURN_ON|TURN_OFF|"
+    r"MOVE_SLIDER|PUSH_INTO|PUSH|TURN_OBJECT)\b(?:\([^)]*\))?",
     re.IGNORECASE,
 )
 
@@ -81,25 +82,38 @@ def normalize_atomic_skill_name(text: str) -> str:
     if match is None:
         return text.strip().upper().split("(", 1)[0]
 
-    skill = match.group(1).upper()
-    legacy_map = {
-        "PICK": "PICKUP_FROM",
-        "PLACE": "PLACE_ON",
-        "TURN": "TURN_ON",
-    }
-    return legacy_map.get(skill, skill)
+    return match.group(1).upper()
+
+
+# Embedding for AtomicVLA on Libero
+# def embed_sigma(x: str) -> float:
+#     """Maps canonical skill names onto the five AtomicVLA experts."""
+#     sigma_map = {
+#         "PICKUP_FROM": 0.0,
+#         "PLACE_ON": 1.0,
+#         "PLACE_IN": 1.0,
+#         "OPEN": 2.0,
+#         "CLOSE": 3.0,
+#         "TURN_ON": 4.0,
+#         "TURN_OFF": 4.0,
+#     }
+#     return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
 
 
 def embed_sigma(x: str) -> float:
-    """Maps canonical skill names onto the five AtomicVLA experts."""
+    """Maps canonical CALVIN skill names onto AtomicVLA experts."""
     sigma_map = {
         "PICKUP_FROM": 0.0,
         "PLACE_ON": 1.0,
         "PLACE_IN": 1.0,
         "OPEN": 2.0,
-        "CLOSE": 3.0,
-        "TURN_ON": 4.0,
-        "TURN_OFF": 4.0,
+        "CLOSE": 2.0,
+        "TURN_ON": 3.0,
+        "TURN_OFF": 3.0,
+        "MOVE_SLIDER": 4.0,
+        "PUSH": 5.0,
+        "PUSH_INTO": 6.0,
+        "TURN_OBJECT": 7.0,
     }
     return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
 
