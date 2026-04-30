@@ -504,6 +504,8 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         self.updated_skill_prob = 0.5
         self.learn_plan_generation_prob = 0.95
         self.learn_reasoning_prob = 0.5
+        self.no_image_prob = 0.5
+        self.no_image_logged = False
         self.is_computing_norm_stats = data_config.is_computing_norm_stats
 
         # new params for training experiments
@@ -682,6 +684,14 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         return_dict['observation/image'] = self.hf_dataset[idx]['image']
         if self.use_wrist_image:
             return_dict['observation/wrist_image'] = self.hf_dataset[idx].get('wrist_image', self.hf_dataset[idx]['image'])
+
+        if return_dict['target'] is not None:
+            if self.rdm.rand() < self.no_image_prob:
+                if not self.no_image_logged:
+                    logging.debug("Zeroing image observations randomly since targets were found!")
+                    self.no_image_logged = True
+                return_dict['observation/image'] = torch.zeros_like(return_dict['observation/image'])
+                return_dict['observation/wrist_image'] = torch.zeros_like(return_dict['observation/wrist_image'])
 
         state_idx = np.array([idx])
         low_dim_dict = {}
