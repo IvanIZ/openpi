@@ -688,7 +688,7 @@ class LiberoSkillReasonDataset(LeRobotDataset):
         if return_dict['target'] is not None:
             if self.rdm.rand() < self.no_image_prob:
                 if not self.no_image_logged:
-                    logging.debug("Zeroing image observations randomly since targets were found!")
+                    logging.info("Zeroing image observations randomly since targets were found!")
                     self.no_image_logged = True
                 return_dict['observation/image'] = torch.zeros_like(return_dict['observation/image'])
                 return_dict['observation/wrist_image'] = torch.zeros_like(return_dict['observation/wrist_image'])

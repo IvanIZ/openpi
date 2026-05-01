@@ -1545,8 +1545,8 @@ _CONFIGS = [
             decay_lr=5e-6,
         ),
         wandb_enabled=True,
-        save_interval=500,
-        keep_period=1_000,
+        save_interval=5_000,
+        keep_period=10_000,
     ),
     TrainConfig(
         name="Atomic_libero",
@@ -1628,7 +1628,7 @@ _CONFIGS = [
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
         ).get_freeze_filter(),
-        batch_size=64,
+        batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=5e-5,
