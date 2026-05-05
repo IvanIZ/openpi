@@ -991,6 +991,34 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_real_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(
+                repo_path=REPO_ROOT/"data/orange_plate",
+                prompt_from_task=True
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=1_000,
+    ),
     # Libero 100 (libero_10 + libero_90), yilin wu edition
     TrainConfig(
         name="pi05_libero_100",
@@ -1535,6 +1563,52 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=30_000,     # 10_600 steps with 64 bs = 1 full pass
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        wandb_enabled=True,
+        save_interval=5_000,
+        keep_period=10_000,
+    ),
+    # Skill condition reasoning with reannotated skills, action head only
+    TrainConfig(
+        name="pi05_libero_skill_reason_target_action",
+        model=pi0_fuse.Pi0FuseConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            action_dim=32,
+            action_horizon=16,
+            max_token_len=415,
+            diffusion_loss_coeff=1.0,
+        ),
+        data=LeRobotLiberoReasonDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoSkillReasonDataConfig(
+                prompt_from_task=False,
+                use_reasoning=True,
+                use_wrist_image=True,
+                use_history=False,
+                use_outdated_reasoning=True,
+                action_down_sample_steps=1,
+                #reasoning_json_path=REPO_ROOT/'data/libero-100/cot_skill.json',
+                reasoning_json_path=REPO_ROOT/'data/libero-100/skills_with_targets.json',
+                use_val_dataset=False,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        freeze_filter=pi0_fuse.Pi0FuseConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(freeze_llm=True),
         ema_decay=None,
         num_train_steps=30_000,     # 10_600 steps with 64 bs = 1 full pass
         batch_size=64,

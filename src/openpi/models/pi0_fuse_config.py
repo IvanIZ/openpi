@@ -68,19 +68,26 @@ class Pi0FuseConfig(_model.BaseModelConfig):
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
         return observation_spec, action_spec
 
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
+    def get_freeze_filter(self, freeze_llm=False) -> nnx.filterlib.Filter:
         filters = []
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
         action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
-        if "lora" in self.paligemma_variant:
+        if freeze_llm:
             filters.append(gemma_params_filter)
             if "lora" not in self.action_expert_variant:
                 filters.append(nnx.Not(action_expert_params_filter))
-            has_lora = True
-        elif "lora" in self.action_expert_variant:
-            filters.append(action_expert_params_filter)
-            has_lora = True
+            else:
+                has_lora = True
+        else:
+            if "lora" in self.paligemma_variant:
+                filters.append(gemma_params_filter)
+                if "lora" not in self.action_expert_variant:
+                    filters.append(nnx.Not(action_expert_params_filter))
+                has_lora = True
+            elif "lora" in self.action_expert_variant:
+                filters.append(action_expert_params_filter)
+                has_lora = True
 
         if has_lora:
             filters.append(nnx.Not(nnx_utils.PathRegex(".*lora.*")))
