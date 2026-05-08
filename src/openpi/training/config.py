@@ -115,6 +115,45 @@ class AtomicDataConfig(DataConfig):
     use_outdated_reasoning: bool = True
 
 
+@dataclasses.dataclass(frozen=True)
+class LiberoTraceDataConfig(DataConfig):
+    """Extended DataConfig for the TraceVLA model on LIBERO.
+
+    Carries paths to both annotation files (skill segments + trace targets/EE) and
+    training-time hyperparameters specific to trace generation:
+
+      - ``trace_horizon`` / ``trace_resample_method`` define the (N, 2) trace shape
+        and how variable-length segments are downsampled to it.
+      - ``h_train_max`` is the maximum anchor age used during training (matches the
+        receding-horizon design; the deployment re-plan period F must be ≤ this).
+      - ``scene_dropout_rate`` is the probability to mask out the scene image while
+        keeping the trace overlay/anchors clean.
+      - ``overlay_*`` control the polyline rendering style for the action-head input.
+    """
+
+    seed: int = 42
+    skill_annotations_path: str = ""
+    trace_annotations_path: str = ""
+    use_wrist_image: bool = True
+    is_computing_norm_stats: bool = False
+    action_down_sample_steps: int = 1
+
+    # Trace head shape and resampling.
+    trace_horizon: int = 20
+    trace_resample_method: str = "arc_length"  # or "time_uniform"
+
+    # Receding-horizon training: max anchor-age (in control steps).
+    h_train_max: int = 15
+
+    # Scene dropout (planning + execution).
+    scene_dropout_rate: float = 0.15
+
+    # Overlay rendering.
+    overlay_color: tuple[int, int, int] = (0, 255, 255)
+    overlay_thickness: int = 2
+    overlay_endpoint_radius: float = 2.5
+
+
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         """Create a group."""
@@ -540,6 +579,56 @@ class LeRobotLiberoReasonDataConfig(DataConfigFactory):
         base = self.create_base_config(assets_dirs, model_config)
         if base.norm_stats is None:
             base = dataclasses.replace(base, norm_stats={})
+        return dataclasses.replace(
+            base,
+            repack_transforms=_transforms.Group(),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotTraceVLADataConfig(DataConfigFactory):
+    """Data factory for TraceVLA on LIBERO.
+
+    Produces a ``LiberoTraceDataConfig`` with the right repack + data + model transforms
+    for the TraceVLA model. The transforms pack the trace fields (``semantic_target_xy``,
+    ``current_ee_xy``, ``future_trace_xy``, etc.) and the overlay image into the model input.
+    """
+
+    base_config: tyro.conf.Suppress[LiberoTraceDataConfig | None] = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Local imports to avoid a heavy import cycle at module load time.
+        import openpi.policies.libero_trace_policy as libero_trace_policy  # noqa: PLC0415
+        from openpi.models import pi0_trace_vla_config as pi0_trace_vla_config  # noqa: PLC0415
+
+        if not isinstance(model_config, pi0_trace_vla_config.Pi0TraceVLAConfig):
+            raise TypeError(
+                f"LeRobotTraceVLADataConfig expects a Pi0TraceVLAConfig model_config, got {type(model_config).__name__}"
+            )
+
+        # Inputs: pack the dataset's dict into the model's expected shape.
+        data_transforms = _transforms.Group(
+            inputs=[libero_trace_policy.LiberoTraceInputs(model_type=model_config.model_type)],
+            outputs=[libero_trace_policy.LiberoTraceOutputs()],
+        )
+
+        # Model transforms: resize images (incl. overlay), tokenize prompt, pad action dims.
+        model_transforms = _transforms.Group(
+            inputs=[
+                libero_trace_policy.TraceResizeImages(224, 224),
+                libero_trace_policy.TraceTokenizePrompt(
+                    _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    discrete_state_input=False,
+                ),
+                _transforms.PadStatesAndActions(model_config.action_dim),
+            ],
+        )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        # If norm stats absent, allow training (we can use zero-norm fallback when computing norm stats).
         return dataclasses.replace(
             base,
             repack_transforms=_transforms.Group(),
@@ -1716,6 +1805,111 @@ _CONFIGS = [
         #num_train_steps=30_000,
         num_train_steps=100_000,     # Bumping it up to atomicVLA setting. We will train everything at 100k
         keep_period=10_000
+    ),
+    # ============================================================
+    # Trace-augmented VLA (Pi0TraceVLA) - full finetune and LoRA.
+    # ============================================================
+    TrainConfig(
+        name="trace_vla",
+        # Full finetune: gemma_2b for the VLM, gemma_300m for the action head, full FT trace MoE.
+        model=__import__(
+            "openpi.models.pi0_trace_vla_config", fromlist=["Pi0TraceVLAConfig"]
+        ).Pi0TraceVLAConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            trace_expert_variant="trace_moe_gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLADataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=str(REPO_ROOT / "data/libero-100"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=200_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_lora",
+        # LoRA finetune: gemma_2b_lora + gemma_300m_lora; trace expert and completion head are full FT.
+        model=__import__(
+            "openpi.models.pi0_trace_vla_config", fromlist=["Pi0TraceVLAConfig"]
+        ).Pi0TraceVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            trace_expert_variant="trace_moe_gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLADataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=str(REPO_ROOT / "data/libero-100"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        # Compute the freeze filter from the matching model config.
+        freeze_filter=__import__(
+            "openpi.models.pi0_trace_vla_config", fromlist=["Pi0TraceVLAConfig"]
+        ).Pi0TraceVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            trace_expert_variant="trace_moe_gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_trace_experts=5,
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2e-4,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=50_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
     ),
 ]
 

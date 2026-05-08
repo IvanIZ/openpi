@@ -780,6 +780,128 @@ class AtomicReasoningPolicy(BasePolicy):
         return self._metadata
 
 
+class TraceVLAPolicy(BasePolicy):
+    """Inference policy for ``Pi0TraceVLA``.
+
+    Exposes two endpoints, mirroring the model's two forward passes:
+
+      - :meth:`infer` (default endpoint, override of :class:`BasePolicy`):
+        runs the **execution forward** — both action denoising and skill-completion
+        prediction in one shared prefix prefill. Returns
+        ``{"state", "actions", "progress", ...}`` where ``progress`` is the per-skill
+        completion-progress scalar in ``[0, 1]``.
+
+      - :meth:`sample_trace`: runs the **planning forward** — generates a
+        ``(N, 2)`` normalized-image-space trace via flow matching, conditioned on
+        the semantic target keypoint and the current EE keypoint. The caller is
+        expected to render this trace as the overlay image and feed it back into
+        :meth:`infer` via ``obs["observation/overlay_image"]``.
+
+    Closed-loop trace caching (i.e. how often to call ``sample_trace`` vs
+    ``infer``) is left to the caller — typical deployment runs ``infer`` at the
+    control loop rate and ``sample_trace`` at a lower rate, switching skills
+    when ``progress`` exceeds a threshold.
+    """
+
+    def __init__(
+        self,
+        model: _model.BaseModel,
+        *,
+        rng: at.KeyArrayLike | None = None,
+        transforms: Sequence[_transforms.DataTransformFn] = (),
+        output_transforms: Sequence[_transforms.DataTransformFn] = (),
+        sample_kwargs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        # Validate the model exposes the public completion / trace endpoints we need.
+        for method_name in ("sample_actions_and_completion", "sample_trace"):
+            if not hasattr(model, method_name):
+                raise ValueError(
+                    f"TraceVLAPolicy requires model.{method_name}(); the model passed "
+                    f"in does not expose it. Use a Pi0TraceVLA-derived model."
+                )
+
+        self._model = model
+        self._sample_actions_and_completion = nnx_utils.module_jit(model.sample_actions_and_completion)
+        self._sample_trace = nnx_utils.module_jit(model.sample_trace)
+        self._predict_completion = nnx_utils.module_jit(model.predict_completion) \
+            if hasattr(model, "predict_completion") else None
+
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._sample_kwargs = sample_kwargs or {}
+        self._metadata = metadata or {}
+        # Use explicit `is None` rather than `rng or ...` because a JAX PRNGKey is
+        # a 0-d array and would raise on `bool()`.
+        self._rng = jax.random.key(0) if rng is None else rng
+
+    def _prepare_inputs(self, obs: dict) -> tuple[dict, "_model.Observation"]:
+        """Apply input transforms, batchify, and build a TraceObservation."""
+        from openpi.models import trace_observation as _trace_obs  # local import to avoid cycles
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        observation = _trace_obs.TraceObservation.from_dict(inputs)
+        return inputs, observation
+
+    @override
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        inputs, observation = self._prepare_inputs(obs)
+        self._rng, sample_rng = jax.random.split(self._rng)
+
+        sample_kwargs = dict(self._sample_kwargs)
+        if noise is not None:
+            n = jnp.asarray(noise)
+            if n.ndim == 2:  # (action_horizon, action_dim) -> add batch dim
+                n = n[None, ...]
+            sample_kwargs["noise"] = n
+
+        start_time = time.monotonic()
+        actions, progress = self._sample_actions_and_completion(sample_rng, observation, **sample_kwargs)
+        model_time = time.monotonic() - start_time
+
+        outputs = {
+            "state": inputs["state"],
+            "actions": actions,
+            "progress": progress,
+        }
+        # Unbatch and convert to numpy.
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {"infer_ms": model_time * 1000.0}
+        return outputs
+
+    def sample_trace(self, obs: dict, *, num_steps: int = 10) -> np.ndarray:
+        """Sample a normalized image-space trace from the planning forward.
+
+        Returns a ``(N, 2)`` numpy array with each waypoint in ``[0, 1]^2``. The caller
+        is responsible for de-normalizing to the target image resolution and rendering
+        the overlay (e.g. via ``trace_utils.draw_polyline_overlay``).
+        """
+        _inputs, observation = self._prepare_inputs(obs)
+        self._rng, plan_rng = jax.random.split(self._rng)
+        trace = self._sample_trace(plan_rng, observation, num_steps=num_steps)
+        return np.asarray(trace[0])
+
+    def predict_completion(self, obs: dict) -> np.ndarray:
+        """Standalone completion-progress query (no action sampling).
+
+        Cheaper than :meth:`infer` when actions are not needed this step (e.g. running
+        completion checks at a lower cadence than the action loop). Returns a
+        scalar in ``[0, 1]``.
+        """
+        if self._predict_completion is None:
+            raise RuntimeError("Underlying model does not expose `predict_completion`.")
+        _inputs, observation = self._prepare_inputs(obs)
+        self._rng, query_rng = jax.random.split(self._rng)
+        progress = self._predict_completion(query_rng, observation)
+        return np.asarray(progress[0])
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
+
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""
 

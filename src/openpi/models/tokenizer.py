@@ -86,36 +86,36 @@ def normalize_atomic_skill_name(text: str) -> str:
 
 
 # Embedding for AtomicVLA on Libero
-# def embed_sigma(x: str) -> float:
-#     """Maps canonical skill names onto the five AtomicVLA experts."""
-#     sigma_map = {
-#         "PICKUP_FROM": 0.0,
-#         "PLACE_ON": 1.0,
-#         "PLACE_IN": 1.0,
-#         "OPEN": 2.0,
-#         "CLOSE": 3.0,
-#         "TURN_ON": 4.0,
-#         "TURN_OFF": 4.0,
-#     }
-#     return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
-
-
 def embed_sigma(x: str) -> float:
-    """Maps canonical CALVIN skill names onto AtomicVLA experts."""
+    """Maps canonical skill names onto the five AtomicVLA experts."""
     sigma_map = {
         "PICKUP_FROM": 0.0,
         "PLACE_ON": 1.0,
         "PLACE_IN": 1.0,
         "OPEN": 2.0,
-        "CLOSE": 2.0,
-        "TURN_ON": 3.0,
-        "TURN_OFF": 3.0,
-        "MOVE_SLIDER": 4.0,
-        "PUSH": 5.0,
-        "PUSH_INTO": 6.0,
-        "TURN_OBJECT": 7.0,
+        "CLOSE": 3.0,
+        "TURN_ON": 4.0,
+        "TURN_OFF": 4.0,
     }
     return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
+
+
+# def embed_sigma(x: str) -> float:
+#     """Maps canonical CALVIN skill names onto AtomicVLA experts."""
+#     sigma_map = {
+#         "PICKUP_FROM": 0.0,
+#         "PLACE_ON": 1.0,
+#         "PLACE_IN": 1.0,
+#         "OPEN": 2.0,
+#         "CLOSE": 2.0,
+#         "TURN_ON": 3.0,
+#         "TURN_OFF": 3.0,
+#         "MOVE_SLIDER": 4.0,
+#         "PUSH": 5.0,
+#         "PUSH_INTO": 6.0,
+#         "TURN_OBJECT": 7.0,
+#     }
+#     return sigma_map.get(normalize_atomic_skill_name(x), 0.0)
 
 
 class AtomicPaligemmaTokenizer:
