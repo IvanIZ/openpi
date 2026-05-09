@@ -1872,7 +1872,7 @@ _CONFIGS = [
         data=LeRobotTraceVLADataConfig(
             repo_id="yilin-wu/libero-100",
             base_config=LiberoTraceDataConfig(
-                repo_path=str(REPO_ROOT / "data/libero-100"),
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
                 prompt_from_task=True,
                 skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
                 trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
@@ -1905,7 +1905,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=50_000,
+        num_train_steps=40_000,
         save_interval=5_000,
         keep_period=10_000,
         log_interval=100,

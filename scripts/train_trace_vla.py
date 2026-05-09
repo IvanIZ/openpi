@@ -102,9 +102,18 @@ def _load_and_filter_weights(loader, params_shape, num_trace_experts: int = 5):
     ]
     for trg_suffix, src_suffix in suffix_pairs:
         for k in list(flat_loaded.keys()):
-            if src_suffix in k:
-                trg_key = tuple(seg if seg != src_suffix else trg_suffix for seg in k)
-                flat_loaded[trg_key] = flat_loaded[k]
+            if src_suffix not in k:
+                continue
+            # The trace expert is always full-FT (`trace_moe_gemma_300m`, never the LoRA
+            # variant), so its nnx state has no `lora_a`/`lora_b` slots. When the action
+            # expert is LoRA-fied (`gemma_300m_lora`), `flat_loaded` does contain
+            # `..._1/lora_a`/`..._1/lora_b` (back-filled by `_merge_params(missing_regex=".*lora.*")`
+            # from the model's reference state). Copying those into `..._2/lora_a` would add
+            # keys the trace stream cannot accept, and `replace_by_pure_dict` would refuse.
+            if any("lora" in seg for seg in k):
+                continue
+            trg_key = tuple(seg if seg != src_suffix else trg_suffix for seg in k)
+            flat_loaded[trg_key] = flat_loaded[k]
 
     # Map dense FFN (mlp_1) -> trace MoE experts (moe_2/expert_{k}/w{1,2,3}).
     # mlp_1 stores (gating_einsum: (L, 2, in, hidden)) and (linear: (L, hidden, in)) when scanned.
@@ -270,6 +279,7 @@ def _create_trace_data_loader(config: _config.TrainConfig, *, sharding: jax.shar
             f"train_trace_vla requires LeRobotTraceVLADataConfig, got {type(config.data).__name__}"
         )
     data_config = config.data.create(config.assets_dirs, config.model)
+    logging.info(f"data_config: {data_config}")
 
     dataset = LiberoTraceDataset(data_config, action_horizon=config.model.action_horizon)
     # Use the standard pipeline's norm-stats handling: norm stats must already be computed
