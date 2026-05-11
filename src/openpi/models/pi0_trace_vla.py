@@ -117,6 +117,13 @@ class Pi0TraceVLA(_model.BaseModel):
         self.num_trace_experts = int(config.num_trace_experts)
         self.trace_horizon = int(config.trace_horizon)
         self.trace_dim = int(config.trace_dim)
+        # When the semantic-target anchor row is appended, the trace stream
+        # internally carries ``trace_horizon + 1`` tokens (the extra one is
+        # inpainting-clamped to ``p_tgt`` and masked from the flow loss). The
+        # user-facing trace shape returned by ``sample_trace`` remains
+        # ``(B, trace_horizon, 2)``.
+        self.append_target_anchor = bool(getattr(config, "append_target_anchor", False))
+        self.trace_seq_len = self.trace_horizon + (1 if self.append_target_anchor else 0)
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -285,11 +292,17 @@ class Pi0TraceVLA(_model.BaseModel):
 
         adarms_cond = time_emb + tgt_emb  # (B, trace_width)
 
+        # Build masks dynamically from the actual trace-stream length (which may
+        # differ from ``self.trace_horizon`` when the semantic-target anchor row
+        # is appended; see ``trace_seq_len``).
+        seq_len = trace_tokens.shape[1]
         input_mask = jnp.ones(trace_tokens.shape[:2], dtype=jnp.bool_)
-        ar_mask = jnp.broadcast_to(
-            jnp.array([True] + ([False] * (self.trace_horizon - 1))),
-            trace_tokens.shape[:2],
-        )
+        # ar_mask = [True, False, ..., False] of length seq_len: the trace tokens
+        # form a single non-causal block (all mutually visible) after the prefix.
+        row0 = jnp.ones((1,), dtype=jnp.bool_)
+        rest = jnp.zeros((seq_len - 1,), dtype=jnp.bool_)
+        single_ar = jnp.concatenate([row0, rest], axis=0)
+        ar_mask = jnp.broadcast_to(single_ar, trace_tokens.shape[:2])
         return trace_tokens, input_mask, ar_mask, adarms_cond
 
     # -----------------------------------------------------------------------
@@ -334,7 +347,15 @@ class Pi0TraceVLA(_model.BaseModel):
         rng: at.KeyArrayLike,
         obs: _trace_obs.TraceObservation,
     ) -> tuple[at.Float[at.Array, "b n 2"], at.Float[at.Array, "b n 2"], at.Bool[at.Array, "b n"]]:
-        """Run the planning forward pass and return (v_pred, u_target, mask)."""
+        """Run the planning forward pass and return (v_pred, u_target, mask).
+
+        When ``append_target_anchor`` is True, the trace stream is extended by
+        one extra row whose flow-matching target is ``p_tgt`` (the semantic
+        target). That row is inpainting-clamped at every step and masked from
+        the loss, mirroring the row-0 (current-EE) treatment. The returned
+        tensors carry the *extended* sequence length so the caller's masking
+        math stays straightforward.
+        """
         noise_rng, time_rng = jax.random.split(rng, 2)
 
         future_trace = obs.future_trace_xy  # (B, N, 2)
@@ -342,11 +363,28 @@ class Pi0TraceVLA(_model.BaseModel):
             raise ValueError("future_trace_xy is required for trace flow-matching loss.")
         batch_shape = future_trace.shape[:-2]  # (B,)
 
-        noise = jax.random.normal(noise_rng, future_trace.shape)
+        target_xy = obs.semantic_target_xy
+        if target_xy is None:
+            raise ValueError("semantic_target_xy is required for trace conditioning.")
+
+        # When configured, append ``p_tgt`` as the extra (N+1)th row of the
+        # supervised trace. This row is NOT a true trace point — it has a
+        # different role (semantic-target anchor) — but flow matching's joint
+        # distribution over the (N+1, 2) tokens is well-defined, and the loss
+        # mask below excludes this row so the model is only supervised on the
+        # true trace.
+        if self.append_target_anchor:
+            future_trace_ext = jnp.concatenate(
+                [future_trace, target_xy[:, None, :]], axis=1
+            )  # (B, N+1, 2)
+        else:
+            future_trace_ext = future_trace  # (B, N, 2)
+
+        noise = jax.random.normal(noise_rng, future_trace_ext.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001  # (B,)
         time_e = time[..., None, None]  # (B, 1, 1)
-        x_t = time_e * noise + (1.0 - time_e) * future_trace
-        u_t = noise - future_trace
+        x_t = time_e * noise + (1.0 - time_e) * future_trace_ext
+        u_t = noise - future_trace_ext
 
         # Inpainting clamp on row 0 (start-anchor at current EE pixel).
         ee = obs.current_ee_xy  # (B, 2)
@@ -356,27 +394,37 @@ class Pi0TraceVLA(_model.BaseModel):
         x_t_row0 = (1.0 - time[:, None]) * ee + time[:, None] * noise[:, 0, :]  # (B, 2)
         x_t = x_t.at[:, 0, :].set(x_t_row0)
 
+        # Inpainting clamp on the appended last row (semantic-target anchor).
+        # Same forward-process convention: noise level matches the rest of x_t,
+        # mean centered at p_tgt. Because ``future_trace_ext[:, -1, :] == p_tgt``
+        # by construction above, this clamp is also exactly consistent with the
+        # supervision target (just like row 0 is consistent with the dataset's
+        # ``future_trace[:, 0] == current_ee`` invariant).
+        if self.append_target_anchor:
+            x_t_row_last = (
+                (1.0 - time[:, None]) * target_xy + time[:, None] * noise[:, -1, :]
+            )  # (B, 2)
+            x_t = x_t.at[:, -1, :].set(x_t_row_last)
+
         # Build prefix (use clean images for planning).
         prefix_tokens, prefix_mask, prefix_ar_mask = self._embed_prefix_with_images(
             obs, obs.images, obs.image_masks
         )
 
         # Build trace suffix (target -> AdaRMS, time -> AdaRMS).
-        target_xy = obs.semantic_target_xy
-        if target_xy is None:
-            raise ValueError("semantic_target_xy is required for trace conditioning.")
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond_trace = self._embed_trace_suffix(
             x_t, time, target_xy
         )
 
-        # Hard-routed combine_weights for the trace stream: skill -> one-hot, broadcast across N tokens.
+        # Hard-routed combine_weights for the trace stream: skill -> one-hot,
+        # broadcast across all trace tokens (including the anchor row if any).
         if obs.atomic_token is None:
             raise ValueError("atomic_token is required for hard MoE routing.")
         skill_id = obs.atomic_token.astype(jnp.int32)  # (B,)
         skill_one_hot = jax.nn.one_hot(skill_id, self.num_trace_experts)  # (B, K)
         combine_weights = jnp.broadcast_to(
             skill_one_hot[:, None, :],
-            (skill_one_hot.shape[0], self.trace_horizon, self.num_trace_experts),
+            (skill_one_hot.shape[0], self.trace_seq_len, self.num_trace_experts),
         )
 
         # Joint forward over [paligemma, None, trace_suffix].
@@ -394,14 +442,19 @@ class Pi0TraceVLA(_model.BaseModel):
         )
         del prefix_out, action_out_unused
 
-        # Take last N tokens of stream 2 -> velocity prediction.
-        v_t = self.trace_out_proj(trace_out[:, -self.trace_horizon :])
-        # Mask out the inpainted first row.
-        N = self.trace_horizon
-        loss_mask = jnp.concatenate(
-            [jnp.zeros((1, 1), dtype=jnp.bool_), jnp.ones((1, N - 1), dtype=jnp.bool_)],
-            axis=1,
-        )
+        # Take last trace_seq_len tokens of stream 2 -> velocity prediction.
+        v_t = self.trace_out_proj(trace_out[:, -self.trace_seq_len :])
+        # Mask out the inpainted rows: row 0 always; the appended last row when present.
+        # Build the static mask of shape (1, trace_seq_len) then broadcast.
+        L = self.trace_seq_len
+        mask_first = jnp.zeros((1, 1), dtype=jnp.bool_)  # row 0: inpainted, excluded
+        if self.append_target_anchor:
+            mask_middle = jnp.ones((1, L - 2), dtype=jnp.bool_)  # supervised rows
+            mask_last = jnp.zeros((1, 1), dtype=jnp.bool_)       # anchor row: inpainted, excluded
+            loss_mask = jnp.concatenate([mask_first, mask_middle, mask_last], axis=1)
+        else:
+            mask_middle = jnp.ones((1, L - 1), dtype=jnp.bool_)
+            loss_mask = jnp.concatenate([mask_first, mask_middle], axis=1)
         loss_mask = jnp.broadcast_to(loss_mask, v_t.shape[:2])
         return v_t, u_t, loss_mask
 
@@ -777,15 +830,19 @@ class Pi0TraceVLA(_model.BaseModel):
 
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
+        # Noise lives on the *internal* trace sequence (includes the appended
+        # semantic-target anchor row when enabled). The returned trace strips
+        # the anchor before handing back to the caller.
+        L = self.trace_seq_len
         if noise is None:
-            noise = jax.random.normal(rng, (batch_size, self.trace_horizon, self.trace_dim))
+            noise = jax.random.normal(rng, (batch_size, L, self.trace_dim))
 
         target_xy = observation.semantic_target_xy
         ee = observation.current_ee_xy
         skill_id = observation.atomic_token.astype(jnp.int32)
         skill_one_hot = jax.nn.one_hot(skill_id, self.num_trace_experts)
         combine_weights = jnp.broadcast_to(
-            skill_one_hot[:, None, :], (batch_size, self.trace_horizon, self.num_trace_experts)
+            skill_one_hot[:, None, :], (batch_size, L, self.num_trace_experts)
         )
 
         # Prefill VLM with the clean (no-overlay) prefix.
@@ -802,19 +859,26 @@ class Pi0TraceVLA(_model.BaseModel):
             hard_combine_weights=combine_weights,
         )
 
-        # Fix the row-0 noise sample to the row-0 entry of the initial noise tensor.
-        # Training inpaints row 0 with `(1-t)*ee + t*noise[:, 0, :]` for a single
-        # `noise` sample per pass. Reusing `noise[:, 0, :]` here puts the row-0
-        # trajectory on a continuous interpolation in t that matches the
-        # training-time conditional distribution at every t. (Resampling fresh
-        # noise per Euler step would jump row 0 around in noise space and
-        # perturb the other waypoints via trace self-attention.)
+        # Fix the row-0 noise sample (and, when present, the appended last-row
+        # noise) to the corresponding entries of the initial noise tensor.
+        # Training inpaints row 0 with ``(1-t)*ee + t*noise[:, 0, :]`` for a
+        # single ``noise`` sample per pass. Reusing those eps values here puts
+        # the inpainted rows on a continuous interpolation in t that matches
+        # the training-time conditional distribution at every t. (Resampling
+        # fresh noise per Euler step would jump the anchors around in noise
+        # space and perturb the other waypoints via trace self-attention.)
         fixed_eps_row0 = noise[:, 0, :]
+        fixed_eps_row_last = noise[:, -1, :]
+
+        append_anchor = self.append_target_anchor
 
         def step(carry):
             x_t, time = carry
             x_t_row0 = (1.0 - time) * ee + time * fixed_eps_row0
             x_t = x_t.at[:, 0, :].set(x_t_row0)
+            if append_anchor:
+                x_t_row_last = (1.0 - time) * target_xy + time * fixed_eps_row_last
+                x_t = x_t.at[:, -1, :].set(x_t_row_last)
 
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self._embed_trace_suffix(
                 x_t, jnp.broadcast_to(time, (batch_size,)), target_xy
@@ -832,7 +896,7 @@ class Pi0TraceVLA(_model.BaseModel):
                 hard_combine_weights=combine_weights,
             )
             del prefix_out, _action_out
-            v_t = self.trace_out_proj(trace_out[:, -self.trace_horizon :])
+            v_t = self.trace_out_proj(trace_out[:, -L :])
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
@@ -840,7 +904,13 @@ class Pi0TraceVLA(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        # Defensive final clamp to exactly p_ee. Analytically a no-op under the
-        # fixed-noise scheme above (row 0 = ee at t=0), kept as a numerical safety net.
+        # Defensive final clamps: at t=0, the inpainting math collapses the
+        # anchor rows exactly to ``ee`` and ``target_xy``; we re-assert that
+        # explicitly to absorb any accumulated float drift.
         x_0 = x_0.at[:, 0, :].set(ee)
+        if append_anchor:
+            x_0 = x_0.at[:, -1, :].set(target_xy)
+            # Strip the anchor row before returning: callers want the actual
+            # (N, 2) trace polyline, not the (N+1, 2) extended sequence.
+            x_0 = x_0[:, :self.trace_horizon, :]
         return x_0

@@ -52,6 +52,16 @@ class Pi0TraceVLAConfig(_model.BaseModelConfig):
     # Number of skill-specific experts in the trace MoE.
     num_trace_experts: int = 5
 
+    # When True, the trace stream is extended by one extra token whose value is
+    # inpainting-clamped to the semantic target ``p_tgt`` (the same mechanism
+    # already used for the current-EE clamp at row 0). This gives the trace
+    # generator a hard, spatial anchor for the target — complementary to the
+    # AdaRMS modulation pathway. The supervised flow-matching target for the
+    # extra row is constructed by appending ``p_tgt`` to the dataset's
+    # ``future_trace_xy``; the flow loss is masked at this extra row (just as
+    # it is at row 0).
+    append_target_anchor: bool = True
+
     # Loss weights.
     trace_loss_coeff: float = 1.0
     action_loss_coeff: float = 1.0

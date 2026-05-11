@@ -148,6 +148,21 @@ class LiberoTraceDataConfig(DataConfig):
     # Scene dropout (planning + execution).
     scene_dropout_rate: float = 0.15
 
+    # Overlay dropout: with probability ``overlay_dropout_rate`` the execution-mode
+    # overlay image is replaced with the *clean* base image (no trace polyline),
+    # forcing the action head to occasionally act without a trace cue. Dual of the
+    # scene dropout above; targets the inference failure mode of over-relying on
+    # the trace overlay. Independent draw from the scene dropout.
+    overlay_dropout_rate: float = 0.10
+
+    # Smooth low-frequency perturbation applied to the overlay trace (only — the
+    # supervised trace target is left untouched). Sigma is drawn uniformly from
+    # ``[0, trace_perturb_max_sigma]`` per sample, so a fraction of samples land
+    # near-clean and the rest get progressively bent. Units are normalized [0, 1]
+    # image-space; ~0.03 ≈ 7 px on a 224×224 image.
+    trace_perturb_max_sigma: float = 0.03
+    trace_perturb_num_freqs: int = 3
+
     # Overlay rendering.
     overlay_color: tuple[int, int, int] = (0, 255, 255)
     overlay_thickness: int = 2

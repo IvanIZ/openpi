@@ -107,6 +107,12 @@ class LiberoTraceDataset(LeRobotDataset):
         self.h_train_max = int(data_config.h_train_max)
         self.scene_dropout_rate = float(data_config.scene_dropout_rate)
 
+        # New regularization: overlay dropout (replace overlay w/ clean image) and
+        # smooth low-frequency trace perturbation applied to the overlay trace only.
+        self.overlay_dropout_rate = float(getattr(data_config, "overlay_dropout_rate", 0.10))
+        self.trace_perturb_max_sigma = float(getattr(data_config, "trace_perturb_max_sigma", 0.03))
+        self.trace_perturb_num_freqs = int(getattr(data_config, "trace_perturb_num_freqs", 3))
+
         # Overlay rendering config.
         self.overlay_color = tuple(int(c) for c in data_config.overlay_color)
         self.overlay_thickness = int(data_config.overlay_thickness)
@@ -181,6 +187,12 @@ class LiberoTraceDataset(LeRobotDataset):
         skill_name = ""
         skill_text = ""  # full raw expression including parameters, e.g. "PICKUP_FROM(white mug, table)"
         skill_id = 0
+        # `plan_text` is the per-episode plan string from skill_annotations.json
+        # (e.g. "1. PICKUP_FROM(...) 2. PLACE_ON(...) ..."). `skill_step_num` is the
+        # 1-based position of the current skill within that plan, so the VLM prompt
+        # can read "Plan: ...  Current step: 2. PICKUP_FROM(...)".
+        plan_text = ""
+        skill_step_num = 0
         sem_target_xy_norm = np.zeros((2,), dtype=np.float32)
         cur_ee_xy_norm = np.zeros((2,), dtype=np.float32)
         # Trace target for the trace generator: always built from `t_now -> seg_end`.
@@ -208,6 +220,12 @@ class LiberoTraceDataset(LeRobotDataset):
             skill_text = skill_raw  # keep the full parameterized expression for the VLM prompt
             skill_name = _strip_skill_parameters(skill_raw)
             skill_id = trace_utils.skill_to_expert_id(skill_raw)
+            # Plan text + 1-based step number for the combined prompt.
+            if ep_skill is not None:
+                _plan = ep_skill.get("plan", "")
+                if isinstance(_plan, str):
+                    plan_text = _plan.strip()
+            skill_step_num = seg_idx + 1
             if ep_trace is not None:
                 # Find the matching trace_seg by skill_index OR start/end step.
                 for ts in ep_trace.get("target_traces", []):
@@ -299,6 +317,9 @@ class LiberoTraceDataset(LeRobotDataset):
         else:
             base_image_np = np.asarray(base_image)
         base_image_np = _ensure_hwc_uint8(base_image_np)
+        
+        # Preserve a clean copy of the base image, taken BEFORE any scene-dropout
+        base_image_clean_np = base_image_np.copy()
 
         wrist_image_np = None
         if self.use_wrist_image:
@@ -306,11 +327,28 @@ class LiberoTraceDataset(LeRobotDataset):
             wrist_image_np = w.numpy() if isinstance(w, torch.Tensor) else np.asarray(w)
             wrist_image_np = _ensure_hwc_uint8(wrist_image_np)
 
-        # Overlay base image with the GT (anchor-aged) trace. Note: the *overlay* uses
-        # `overlay_trace_xy_norm` (anchor-aged), which can be stale by up to `h_train_max`
-        # frames. The trace generator's supervision target `future_trace_xy_norm`
-        # always starts at the current EE — see the "Trace generator supervision target"
-        # block above.
+        # Smooth low-frequency perturbation on the *overlay* trace only. The supervised
+        # ``future_trace_xy_norm`` is left untouched: the trace generator must still
+        # learn the true trace, but the action head must learn to tolerate imperfect
+        # predicted traces (the inference-time failure mode). Per-sample sigma is
+        # drawn from ``[0, trace_perturb_max_sigma]`` inside the helper.
+        if (
+            has_trace
+            and not self.is_computing_norm_stats
+            and self.trace_perturb_max_sigma > 0.0
+        ):
+            overlay_trace_xy_norm = trace_utils.smooth_low_freq_perturb(
+                overlay_trace_xy_norm,
+                self.rdm,
+                max_sigma=self.trace_perturb_max_sigma,
+                num_freqs=self.trace_perturb_num_freqs,
+            ).astype(np.float32)
+
+        # Overlay base image with the GT (anchor-aged, possibly perturbed) trace. The
+        # overlay uses ``overlay_trace_xy_norm`` (built from t_anchor), which can be
+        # stale by up to ``h_train_max`` frames. The trace generator's supervision
+        # target ``future_trace_xy_norm`` always starts at the current EE — see the
+        # "Trace generator supervision target" block above.
         if has_trace:
             overlay_image_np = trace_utils.draw_polyline_overlay(
                 base_image_np,
@@ -341,6 +379,21 @@ class LiberoTraceDataset(LeRobotDataset):
                     line_thickness=self.overlay_thickness,
                     endpoint_radius=self.overlay_endpoint_radius,
                 )
+
+        # Overlay dropout (dual of the planning-side scene dropout above): with
+        # probability ``overlay_dropout_rate``, replace the overlay image with the
+        # *clean* base image (no trace polyline). Forces the action head to act
+        # without the trace cue occasionally. We use ``base_image_clean_np`` (the
+        # pre-scene-dropout copy) so the action head gets a real RGB scene to
+        # reason from rather than a zero canvas. Independent draw from the scene-
+        # dropout draws above; this overrides the overlay if both fire.
+        if (
+            has_trace
+            and not self.is_computing_norm_stats
+            and self.overlay_dropout_rate > 0.0
+            and self.rdm.rand() < self.overlay_dropout_rate
+        ):
+            overlay_image_np = base_image_clean_np.copy()
 
         # ----- Build state vector (8-dim, like LiberoSkillReasonDataset) -----
         state_vec = np.concatenate(
@@ -379,6 +432,10 @@ class LiberoTraceDataset(LeRobotDataset):
             "atomic_token": float(skill_id),
             "skill_name": skill_name,
             "skill_text": skill_text,
+            # Per-episode plan string + 1-based current-skill index; combined into
+            # the VLM prompt downstream by ``TraceTokenizePrompt``.
+            "plan_text": plan_text,
+            "skill_step_num": int(skill_step_num),
             "semantic_target_xy": sem_target_xy_norm.astype(np.float32),
             "current_ee_xy": cur_ee_xy_norm.astype(np.float32),
             "future_trace_xy": future_trace_xy_norm.astype(np.float32),

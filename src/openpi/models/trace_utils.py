@@ -274,3 +274,67 @@ def draw_polyline_overlay(
         _filled_disk(image, float(pts[-1, 0]), float(pts[-1, 1]), endpoint_radius, color)
 
     return image
+
+
+# ---------------------------------------------------------------------------
+# Smooth low-frequency trace perturbation
+# ---------------------------------------------------------------------------
+
+def smooth_low_freq_perturb(
+    trace_xy_norm: np.ndarray,
+    rng: np.random.RandomState,
+    *,
+    max_sigma: float = 0.03,
+    num_freqs: int = 3,
+) -> np.ndarray:
+    """Add a smooth low-frequency 2-D offset field to a trace polyline.
+
+    Used to perturb the overlay-rendered trace seen by the action head during
+    training so that it learns to handle imperfect predicted traces (the
+    inference-time failure mode), without exposing it to high-frequency
+    artefacts that don't occur at inference. The offset is built as a sum of a
+    few low-frequency sinusoids in the trace's arc-length parameter, so the
+    perturbed trace remains smooth and "plausible" — just bent.
+
+    Args:
+        trace_xy_norm: ``(N, 2)`` polyline in normalized [0, 1]^2 coords.
+        rng: NumPy RandomState for reproducibility (shared with the dataset).
+        max_sigma: upper bound on the per-sample perturbation magnitude (in
+            normalized units). The actual sigma is drawn uniformly from
+            ``[0, max_sigma]`` per call so the training distribution mixes
+            no-op and stronger perturbations.
+        num_freqs: number of sinusoidal components per axis. Amplitudes decay
+            as ``1 / f`` with frequency so low-frequency bending dominates.
+
+    Returns:
+        ``(N, 2)`` perturbed polyline (same dtype as input). May fall outside
+        [0, 1] — the polyline overlay rasterizer clips out-of-bounds pixels.
+    """
+    trace_xy_norm = np.asarray(trace_xy_norm, dtype=np.float32)
+    if trace_xy_norm.ndim != 2 or trace_xy_norm.shape[-1] != 2:
+        raise ValueError(f"Expected (N, 2) input, got shape {trace_xy_norm.shape}")
+    N = trace_xy_norm.shape[0]
+    if N < 1 or max_sigma <= 0.0 or num_freqs <= 0:
+        return trace_xy_norm.copy()
+
+    sigma = float(rng.uniform(0.0, max_sigma))
+    if sigma <= 0.0:
+        return trace_xy_norm.copy()
+
+    # Normalized arc-position. With N == 1 we degenerate to a single offset.
+    if N == 1:
+        s = np.zeros((1,), dtype=np.float32)
+    else:
+        s = np.linspace(0.0, 1.0, N, dtype=np.float32)
+
+    perturb = np.zeros((N, 2), dtype=np.float32)
+    for f in range(1, int(num_freqs) + 1):
+        # Random amplitude per axis, decaying with frequency.
+        amp_x = float(rng.normal()) * sigma / float(f)
+        amp_y = float(rng.normal()) * sigma / float(f)
+        phase_x = float(rng.uniform(0.0, 2.0 * np.pi))
+        phase_y = float(rng.uniform(0.0, 2.0 * np.pi))
+        perturb[:, 0] += amp_x * np.sin(2.0 * np.pi * float(f) * s + phase_x)
+        perturb[:, 1] += amp_y * np.sin(2.0 * np.pi * float(f) * s + phase_y)
+
+    return (trace_xy_norm + perturb).astype(trace_xy_norm.dtype)

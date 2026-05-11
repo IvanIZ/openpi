@@ -96,6 +96,14 @@ class LiberoTraceInputs(transforms.DataTransformFn):
             inputs["skill_name"] = data["skill_name"]
         if "skill_text" in data:
             inputs["skill_text"] = data["skill_text"]
+        # Also forward the per-episode plan string and the 1-based index of the
+        # current skill within that plan. ``TraceTokenizePrompt`` combines them
+        # with ``skill_text`` into a single natural-language prompt of the form
+        # ``"Plan: 1. ... 2. ... Current step: K. <skill_text>"``.
+        if "plan_text" in data:
+            inputs["plan_text"] = data["plan_text"]
+        if "skill_step_num" in data:
+            inputs["skill_step_num"] = np.asarray(data["skill_step_num"], dtype=np.int32)
 
         return inputs
 
@@ -165,10 +173,31 @@ class TraceTokenizePrompt(transforms.DataTransformFn):
         # downstream once the prompt is tokenized.
         skill_name = self._to_str(data.pop("skill_name", ""))
         skill_text = self._to_str(data.pop("skill_text", ""))
+        plan_text = self._to_str(data.pop("plan_text", ""))
+        # skill_step_num is an integer scalar; pop and coerce to int.
+        _raw_step = data.pop("skill_step_num", 0)
+        try:
+            if isinstance(_raw_step, np.ndarray):
+                skill_step_num = int(_raw_step.item())
+            else:
+                skill_step_num = int(_raw_step)
+        except (TypeError, ValueError):
+            skill_step_num = 0
 
         # Per the TraceVLA design, the VLM sees the externally-selected skill, not the
-        # raw task instruction. Prefer the parameterized expression; fall back gracefully.
-        if skill_text:
+        # raw task instruction. We further feed the *full plan* alongside the current
+        # skill so the model has access to upcoming-step context. Format:
+        #   ``Plan: <plan_text> Current step: <K>. <skill_text>``
+        # The plan is the natural-language list emitted by the annotation pipeline
+        # (e.g. ``"1. PICKUP_FROM(...) 2. PLACE_ON(...)"``). With a small finetune
+        # dataset, natural-language phrasing leverages PaliGemma's pretrained prior
+        # on numbered lists; see the design discussion for why this beats special
+        # tokens. Fall back gracefully if any piece is missing.
+        if skill_text and plan_text and skill_step_num > 0:
+            full_prompt = f"Plan: {plan_text} Current step: {skill_step_num}. {skill_text}"
+        elif skill_text and plan_text:
+            full_prompt = f"Plan: {plan_text} Current step: {skill_text}"
+        elif skill_text:
             full_prompt = skill_text
         elif skill_name:
             full_prompt = skill_name
