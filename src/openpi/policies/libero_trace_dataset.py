@@ -819,11 +819,6 @@ class LiberoOracleDataset(LeRobotDataset):
         seg_end = seg_end_raw if seg_end_raw != -1 else end_idx - start_idx
         seg_end = min(seg_end, end_idx - start_idx)
 
-        # Anchor-age augmentation: a ~ U{0, ..., H_train_max-1}, t_anchor = max(seg_start, t*-a).
-        a = int(self.rdm.randint(0, self.h_train_max)) if self.h_train_max > 1 else 0
-        t_anchor = max(seg_start, episode_step - a)
-
-
         # Semantic target: pixel coordinate + depth.
         sem = trace_seg["semantic_target"]
         sem_pt_pixel = sem["point"]  # [x, y]
