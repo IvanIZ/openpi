@@ -34,6 +34,7 @@ import copy
 import json
 import logging
 import os
+import pathlib
 import re
 
 import numpy as np
@@ -700,6 +701,177 @@ class LiberoTrace3DDataset(LiberoTraceDataset):
             "has_overlay": True,
             "progress": float(progress),
             "diffusion_loss_mask": True,  # action loss always applies for chunks we sampled
+        }
+        # Use the dataset task as the prompt (instruction).
+        if "task_index" in item:
+            try:
+                task_text = self.meta.tasks[int(item["task_index"].item())]
+            except Exception:
+                task_text = ""
+            return_dict["prompt"] = task_text
+        for key in ["timestamp", "frame_index", "episode_index", "index", "task_index"]:
+            return_dict[key] = item[key]
+        return return_dict
+
+
+class LiberoOracleDataset(LeRobotDataset):
+    """
+    Bare minimum "oracle" for pi05: Pass in the plan, skill, and 3d target as prompt.
+    Jank implementation. I'm sorry....
+    """
+    def __init__(self, data_config, action_horizon: int):
+        print("Using LiberoOracleDataset (pi05)")
+        # Resolve root the same way LiberoReasonDataset does.
+
+        import openpi
+        OPENPI_ROOT = pathlib.Path(openpi.__file__).parent.resolve()
+        REPO_ROOT = OPENPI_ROOT / '..' / '..'
+        skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces_3d.json")
+        root = _resolve_dataset_root(
+            data_config.repo_id, skill_annotations_path
+        )
+        super().__init__(
+            data_config.repo_id,
+            root=root,
+            revision="main",
+        )
+        self.data_config = data_config
+        self.action_horizon = action_horizon
+        self.action_down_sample_steps = int(getattr(data_config, "action_down_sample_steps", 1))
+        self.use_wrist_image = bool(getattr(data_config, "use_wrist_image", True))
+        self.is_computing_norm_stats = bool(getattr(data_config, "is_computing_norm_stats", False))
+
+        # State and actions arrays.
+        self.low_dim_keys = ["eef_pos", "eef_rot_axis_angle", "gripper_control"]
+        self.low_dim_features: dict[str, np.ndarray] = {}
+        states = torch.stack(self.hf_dataset["state"]).numpy().astype(np.float32)
+        self.low_dim_features["eef_pos"] = states[:, :3]
+        self.low_dim_features["eef_rot_axis_angle"] = states[:, 3:6]
+        self.low_dim_features["gripper_control"] = states[:, 6:]
+        self.actions = torch.stack(self.hf_dataset["actions"]).numpy().astype(np.float32)
+
+        episode_indices = np.array(self.hf_dataset["episode_index"])
+        unique_episodes = np.unique(episode_indices)
+        episode_masks = episode_indices[:, None] == unique_episodes[None, :]
+        episode_ends = np.where(episode_masks)[0][np.cumsum(episode_masks.sum(0)) - 1] + 1
+        episode_starts = np.concatenate([[0], episode_ends[:-1]])
+        self.episode_starts = episode_starts
+        self.episode_ends = episode_ends
+
+        # Load skill annotations and trace annotations.
+        skill_path = os.path.expanduser(str(skill_annotations_path))
+        if not os.path.isfile(skill_path):
+            raise FileNotFoundError(f"skill_annotations_path not found: {skill_path}")
+
+        self.skills_by_episode = _index_episodes(_safe_load_json(skill_path))
+
+        # Read the (constant) image w/h that the trace coordinates live in.
+        first_ep = next(iter(self.skills_by_episode.values()))
+        self.trace_image_w = int(first_ep.get("image_width", 256))
+        self.trace_image_h = int(first_ep.get("image_height", 256))
+
+        self.indices = list(range(len(self.hf_dataset)))
+        self.rdm = np.random.RandomState(int(getattr(data_config, "seed", 42)))
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int) -> dict:
+        idx = self.indices[idx]
+        item = self.hf_dataset[idx]
+        ep_idx = int(item["episode_index"].item())
+        start_idx = int(self.episode_starts[ep_idx])
+        end_idx = int(self.episode_ends[ep_idx])
+        episode_step = idx - start_idx
+
+        # Lookup skill segments + traces for this episode.
+        ep_data = self.skills_by_episode.get(ep_idx)
+        segments = ep_data["segments"]
+
+        # Identify the current skill segment.
+        seg_idx = _segment_index_for_step(segments, episode_step)
+
+        seg = segments[seg_idx]
+        skill_raw = seg["skill"].strip()
+        skill_text = skill_raw  # full raw expression including parameters, e.g. "PICKUP_FROM(white mug, table)"
+        skill_name = _strip_skill_parameters(skill_raw)
+        skill_id = trace_utils.skill_to_expert_id(skill_raw)
+
+        # `plan_text` is the per-episode plan string from skill_annotations.json
+        # (e.g. "1. PICKUP_FROM(...) 2. PLACE_ON(...) ..."). `skill_step_num` is the
+        # 1-based position of the current skill within that plan, so the VLM prompt
+        # can read "Plan: ...  Current step: 2. PICKUP_FROM(...)".
+        plan_text = ep_data["plan"].strip()
+        skill_step_num = seg_idx + 1
+
+        trace_seg = None
+        # Find the matching trace_seg by skill_index OR start/end step.
+        for ts in ep_data.get("target_traces", []):
+            # Can this just be an index lookup? Why not? - JCP
+            if int(ts.get("skill_index", -1)) == seg_idx:
+                trace_seg = ts
+                break
+        assert trace_seg is not None
+
+        # Construct trace target and EE if available.
+        seg_start = int(seg["start_step"]) if seg is not None else 0
+        seg_end_raw = int(seg["end_step"]) if seg is not None else episode_step + 1
+        seg_end = seg_end_raw if seg_end_raw != -1 else end_idx - start_idx
+        seg_end = min(seg_end, end_idx - start_idx)
+
+        # Anchor-age augmentation: a ~ U{0, ..., H_train_max-1}, t_anchor = max(seg_start, t*-a).
+        a = int(self.rdm.randint(0, self.h_train_max)) if self.h_train_max > 1 else 0
+        t_anchor = max(seg_start, episode_step - a)
+
+
+        # Semantic target: pixel coordinate + depth.
+        sem = trace_seg["semantic_target"]
+        sem_pt_pixel = sem["point"]  # [x, y]
+        sem_target_xyd_normalized = np.array(
+            [
+                sem_pt_pixel[0] / self.trace_image_w - 1,
+                sem_pt_pixel[1] / self.trace_image_h - 1,
+                sem["depth"]
+            ],
+            dtype=np.float32,
+        )
+
+        formatted_prompt = f"Plan: {plan_text}; Skill: {skill_raw}; Target: {sem_pt_pixel[0]:.2f}, {sem_pt_pixel[1]:.2f}, {sem_pt_pixel[2]:.2f}"
+        print(formatted_prompt)
+
+        # ----- Build state vector (8-dim, like LiberoSkillReasonDataset) -----
+        state_vec = np.concatenate(
+            [
+                self.low_dim_features["eef_pos"][idx].flatten(),
+                self.low_dim_features["eef_rot_axis_angle"][idx].flatten(),
+                self.low_dim_features["gripper_control"][idx].flatten(),
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+        # ----- Action chunk with skill-end zero-padding -----
+        # Clip slice to skill end (apply skill-horizon truncation).
+        seg_end_idx_global = start_idx + seg_end
+        slice_end = min(
+            seg_end_idx_global, idx + (self.action_horizon - 1) * self.action_down_sample_steps + 1
+        )
+        slice_end = max(slice_end, idx + 1)
+        actions_chunk = self.actions[idx:slice_end:self.action_down_sample_steps]
+        if actions_chunk.shape[0] == 0:
+            actions_chunk = self.actions[idx:idx + 1]
+        action_is_pad_count = self.action_horizon - actions_chunk.shape[0]
+        action_is_pad = torch.tensor(
+            [False] * actions_chunk.shape[0] + [True] * action_is_pad_count, dtype=torch.bool
+        )
+        final_actions = pad_skill_horizon_actions(actions_chunk, self.action_horizon)
+
+        # ----- Build the return dict -----
+        return_dict = {
+            "observation/image": item['image'],
+            "observation/wrist_image": item['wrist_image'],
+            "observation/state": torch.from_numpy(state_vec),
+            "actions": torch.from_numpy(final_actions.astype(np.float32)),
+            "prompt": formatted_prompt
         }
         # Use the dataset task as the prompt (instruction).
         if "task_index" in item:

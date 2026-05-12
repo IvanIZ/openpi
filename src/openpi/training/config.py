@@ -1821,6 +1821,30 @@ _CONFIGS = [
         num_train_steps=100_000,     # Bumping it up to atomicVLA setting. We will train everything at 100k
         keep_period=10_000
     ),
+    TrainConfig(
+        name="pi05_oracle",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="local/oracle",
+            base_config=DataConfig(
+                repo_path=REPO_ROOT/"data/libero-100",
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=100_000,        # match AtomicVLA
+        keep_period=10_000,
+    ),
     # ============================================================
     # Trace-augmented VLA (Pi0TraceVLA) - full finetune and LoRA.
     # ============================================================
@@ -1844,7 +1868,6 @@ _CONFIGS = [
             repo_id="yilin-wu/libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
-                prompt_from_task=True,
                 skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
                 use_wrist_image=True,
                 is_computing_norm_stats=False,
@@ -1887,7 +1910,6 @@ _CONFIGS = [
             repo_id="yilin-wu/libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
-                prompt_from_task=True,
                 skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
                 use_wrist_image=True,
                 is_computing_norm_stats=False,
@@ -1946,7 +1968,6 @@ _CONFIGS = [
             repo_id="yilin-wu/libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=REPO_ROOT/"data/libero-100",
-                prompt_from_task=True,
                 skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces_3d.json"),
                 use_wrist_image=True,
                 is_computing_norm_stats=False,

@@ -137,6 +137,9 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+    if repo_id == "local/oracle":
+        from openpi.policies.libero_trace_dataset import LiberoOracleDataset
+        return LiberoOracleDataset(data_config, action_horizon)
 
     if isinstance(data_config, _config.LiberoReasonDataConfig):
         from openpi.policies.libero_reason_dataset import LiberoReasonDataset
