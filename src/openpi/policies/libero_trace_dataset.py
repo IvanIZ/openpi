@@ -832,7 +832,6 @@ class LiberoOracleDataset(LeRobotDataset):
         )
 
         formatted_prompt = f"Plan: {plan_text}; Skill: {skill_raw}; Target: {sem_target[0]:.2f}, {sem_target[1]:.2f}, {sem_target[2]:.2f}"
-        print(formatted_prompt)
 
         # ----- Build state vector (8-dim, like LiberoSkillReasonDataset) -----
         state_vec = np.concatenate(
@@ -862,19 +861,13 @@ class LiberoOracleDataset(LeRobotDataset):
 
         # ----- Build the return dict -----
         return_dict = {
-            "observation/image": item['image'],
-            "observation/wrist_image": item['wrist_image'],
-            "observation/state": torch.from_numpy(state_vec),
+            "image": item['image'],
+            "wrist_image": item['wrist_image'],
+            "state": torch.from_numpy(state_vec),
             "actions": torch.from_numpy(final_actions.astype(np.float32)),
             "prompt": formatted_prompt
         }
         # Use the dataset task as the prompt (instruction).
-        if "task_index" in item:
-            try:
-                task_text = self.meta.tasks[int(item["task_index"].item())]
-            except Exception:
-                task_text = ""
-            return_dict["prompt"] = task_text
         for key in ["timestamp", "frame_index", "episode_index", "index", "task_index"]:
             return_dict[key] = item[key]
         return return_dict
