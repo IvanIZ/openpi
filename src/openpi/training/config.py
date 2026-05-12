@@ -1828,6 +1828,7 @@ _CONFIGS = [
             repo_id="local/oracle",
             base_config=DataConfig(
                 repo_path=REPO_ROOT/"data/libero-100",
+                prompt_from_task=False,
             ),
             extra_delta_transform=False,
         ),

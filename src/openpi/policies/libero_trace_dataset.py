@@ -822,7 +822,7 @@ class LiberoOracleDataset(LeRobotDataset):
         # Semantic target: pixel coordinate + depth.
         sem = trace_seg["semantic_target"]
         sem_pt_pixel = sem["point"]  # [x, y]
-        sem_target_xyd_normalized = np.array(
+        sem_target = np.array(
             [
                 sem_pt_pixel[0] / self.trace_image_w - 1,
                 sem_pt_pixel[1] / self.trace_image_h - 1,
@@ -831,7 +831,7 @@ class LiberoOracleDataset(LeRobotDataset):
             dtype=np.float32,
         )
 
-        formatted_prompt = f"Plan: {plan_text}; Skill: {skill_raw}; Target: {sem_pt_pixel[0]:.2f}, {sem_pt_pixel[1]:.2f}, {sem_pt_pixel[2]:.2f}"
+        formatted_prompt = f"Plan: {plan_text}; Skill: {skill_raw}; Target: {sem_target[0]:.2f}, {sem_target[1]:.2f}, {sem_target[2]:.2f}"
         print(formatted_prompt)
 
         # ----- Build state vector (8-dim, like LiberoSkillReasonDataset) -----
