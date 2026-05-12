@@ -81,18 +81,18 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
-def fourier_encode_2d(p: at.Float[at.Array, "*b 2"], num_freqs: int) -> at.Float[at.Array, "*b feat"]:
-    """Map 2-D points (already in [0, 1]^2) to a Fourier feature vector.
+def fourier_encode(p: at.Float[at.Array, "*b n"], num_freqs: int) -> at.Float[at.Array, "*b feat"]:
+    """Map N-D points (already in [0, 1]^N) to a Fourier feature vector.
 
-    Returns `(*b, 2 * 2 * num_freqs)` features: for each of the 2 coords, sin and cos
+    Returns `(*b, N * 2 * num_freqs)` features: for each of the N coords, sin and cos
     at `num_freqs` geometric frequencies.
     """
     freqs = (2.0 ** jnp.arange(num_freqs, dtype=jnp.float32))  # (num_freqs,)
-    # p: (..., 2). Broadcast to (..., 2, num_freqs).
+    # p: (..., 2). Broadcast to (..., ndim, num_freqs).
     angles = p[..., None] * freqs * 2.0 * jnp.pi  # (..., 2, num_freqs)
     sins = jnp.sin(angles)
     coss = jnp.cos(angles)
-    feat = jnp.concatenate([sins, coss], axis=-1)  # (..., 2, 2*num_freqs)
+    feat = jnp.concatenate([sins, coss], axis=-1)  # (..., 2, N*num_freqs)
     new_shape = (*feat.shape[:-2], feat.shape[-2] * feat.shape[-1])
     return feat.reshape(new_shape)
 
@@ -114,9 +114,10 @@ class Pi0TraceVLA(_model.BaseModel):
         if not self.pi05:
             raise ValueError("Pi0TraceVLA assumes pi05=True (adaRMS pathway).")
 
-        self.num_trace_experts = int(config.num_trace_experts)
-        self.trace_horizon = int(config.trace_horizon)
-        self.trace_dim = int(config.trace_dim)
+        self.num_trace_experts = config.num_trace_experts
+        self.trace_horizon = config.trace_horizon
+        self.trace_dim = config.trace_dim
+        self.target_dim = config.target_dim
         # When the semantic-target anchor row is appended, the trace stream
         # internally carries ``trace_horizon + 1`` tokens (the extra one is
         # inpainting-clamped to ``p_tgt`` and masked from the flow loss). The
@@ -175,7 +176,7 @@ class Pi0TraceVLA(_model.BaseModel):
         self.trace_time_mlp_out = nnx.Linear(self.trace_width, self.trace_width, rngs=rngs)
 
         # ---------- Semantic-target Fourier MLP for trace AdaRMS conditioning ----------
-        target_fourier_dim = config.fourier_num_freqs * 2 * 2  # 2 coords * (sin+cos)
+        target_fourier_dim = config.fourier_num_freqs * self.target_dim * 2  # 2 coords * (sin+cos)
         self.target_mlp_in = nnx.Linear(target_fourier_dim, self.trace_width, rngs=rngs)
         self.target_mlp_out = nnx.Linear(self.trace_width, self.trace_width, rngs=rngs)
 
@@ -245,6 +246,7 @@ class Pi0TraceVLA(_model.BaseModel):
     def _embed_action_suffix(
         self,
         noisy_actions: at.Float[at.Array, "b ah ad"],
+        trace_unused: at.Float[at.Array, "b t k"],
         timestep: at.Float[at.Array, " b"],
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
@@ -269,15 +271,23 @@ class Pi0TraceVLA(_model.BaseModel):
     @at.typecheck
     def _embed_trace_suffix(
         self,
-        noisy_trace: at.Float[at.Array, "b n 2"],
+        noisy_trace: at.Float[at.Array, "b n k"],
         timestep: at.Float[at.Array, " b"],
-        target_xy: at.Float[at.Array, "b 2"],
+        target: at.Float[at.Array, "b k"],
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
         at.Bool[at.Array, "b s"],
         at.Float[at.Array, "b emb"],
     ]:
+        """
+        Embed suffix for trace generation diffusion head.
+        
+        b: batch
+        n: length of trace
+        k: trace dimension (should be equal to self.trace_dim)
+        """
+
         trace_tokens = self.trace_in_proj(noisy_trace)
 
         # Time embedding (Fourier sin/cos -> 2-layer MLP -> swish).
@@ -286,7 +296,7 @@ class Pi0TraceVLA(_model.BaseModel):
         time_emb = nnx.swish(self.trace_time_mlp_out(time_emb))
 
         # Semantic-target Fourier embedding -> 2-layer MLP -> swish.
-        tgt_feat = fourier_encode_2d(target_xy, num_freqs=self.config.fourier_num_freqs)
+        tgt_feat = fourier_encode(target, num_freqs=self.config.fourier_num_freqs)
         tgt_emb = nnx.swish(self.target_mlp_in(tgt_feat))
         tgt_emb = nnx.swish(self.target_mlp_out(tgt_emb))
 
@@ -346,7 +356,7 @@ class Pi0TraceVLA(_model.BaseModel):
         self,
         rng: at.KeyArrayLike,
         obs: _trace_obs.TraceObservation,
-    ) -> tuple[at.Float[at.Array, "b n 2"], at.Float[at.Array, "b n 2"], at.Bool[at.Array, "b n"]]:
+    ) -> tuple[at.Float[at.Array, "b n k"], at.Float[at.Array, "b n k"], at.Bool[at.Array, "b n"]]:
         """Run the planning forward pass and return (v_pred, u_target, mask).
 
         When ``append_target_anchor`` is True, the trace stream is extended by
@@ -355,30 +365,34 @@ class Pi0TraceVLA(_model.BaseModel):
         the loss, mirroring the row-0 (current-EE) treatment. The returned
         tensors carry the *extended* sequence length so the caller's masking
         math stays straightforward.
+
+        b: batch dimension
+        n: length of trace
+        k: dimension of trace (should be self.trace_dim)
         """
         noise_rng, time_rng = jax.random.split(rng, 2)
 
-        future_trace = obs.future_trace_xy  # (B, N, 2)
+        future_trace = obs.future_trace_xy  # (B, N, K)
         if future_trace is None:
             raise ValueError("future_trace_xy is required for trace flow-matching loss.")
         batch_shape = future_trace.shape[:-2]  # (B,)
 
-        target_xy = obs.semantic_target_xy
-        if target_xy is None:
+        target = obs.semantic_target_xy
+        if target is None:
             raise ValueError("semantic_target_xy is required for trace conditioning.")
 
         # When configured, append ``p_tgt`` as the extra (N+1)th row of the
         # supervised trace. This row is NOT a true trace point — it has a
         # different role (semantic-target anchor) — but flow matching's joint
-        # distribution over the (N+1, 2) tokens is well-defined, and the loss
+        # distribution over the (N+1, K) tokens is well-defined, and the loss
         # mask below excludes this row so the model is only supervised on the
         # true trace.
         if self.append_target_anchor:
             future_trace_ext = jnp.concatenate(
-                [future_trace, target_xy[:, None, :]], axis=1
-            )  # (B, N+1, 2)
+                [future_trace, target[:, None, :]], axis=1
+            )  # (B, N+1, K)
         else:
-            future_trace_ext = future_trace  # (B, N, 2)
+            future_trace_ext = future_trace  # (B, N, K)
 
         noise = jax.random.normal(noise_rng, future_trace_ext.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001  # (B,)
@@ -387,11 +401,11 @@ class Pi0TraceVLA(_model.BaseModel):
         u_t = noise - future_trace_ext
 
         # Inpainting clamp on row 0 (start-anchor at current EE pixel).
-        ee = obs.current_ee_xy  # (B, 2)
+        ee = obs.current_ee_xy  # (B, K)
         # row 0 of x_t = (1-t) * p_ee + t * eps_row_0  where eps_row_0 = noise[:, 0, :]
         # This matches the forward-process convention: same noise level as other rows,
         # but mean centered at p_ee instead of future_trace[:, 0].
-        x_t_row0 = (1.0 - time[:, None]) * ee + time[:, None] * noise[:, 0, :]  # (B, 2)
+        x_t_row0 = (1.0 - time[:, None]) * ee + time[:, None] * noise[:, 0, :]  # (B, K)
         x_t = x_t.at[:, 0, :].set(x_t_row0)
 
         # Inpainting clamp on the appended last row (semantic-target anchor).
@@ -402,8 +416,8 @@ class Pi0TraceVLA(_model.BaseModel):
         # ``future_trace[:, 0] == current_ee`` invariant).
         if self.append_target_anchor:
             x_t_row_last = (
-                (1.0 - time[:, None]) * target_xy + time[:, None] * noise[:, -1, :]
-            )  # (B, 2)
+                (1.0 - time[:, None]) * target + time[:, None] * noise[:, -1, :]
+            )  # (B, K)
             x_t = x_t.at[:, -1, :].set(x_t_row_last)
 
         # Build prefix (use clean images for planning).
@@ -413,7 +427,7 @@ class Pi0TraceVLA(_model.BaseModel):
 
         # Build trace suffix (target -> AdaRMS, time -> AdaRMS).
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond_trace = self._embed_trace_suffix(
-            x_t, time, target_xy
+            x_t, time, target
         )
 
         # Hard-routed combine_weights for the trace stream: skill -> one-hot,
@@ -492,7 +506,8 @@ class Pi0TraceVLA(_model.BaseModel):
         )
 
         # Build action suffix.
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond_action = self._embed_action_suffix(x_a_t, time)
+        future_trace = obs.future_trace_xy  # (B, N, K)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond_action = self._embed_action_suffix(x_a_t, future_trace, time)
 
         # Trace stream is None for the execution forward pass.
         # Joint forward over [paligemma, action_suffix, None].
@@ -817,12 +832,16 @@ class Pi0TraceVLA(_model.BaseModel):
         observation: _trace_obs.TraceObservation,
         *,
         num_steps: int = 10,
-        noise: at.Float[at.Array, "b n 2"] | None = None,
-    ) -> at.Float[at.Array, "b n 2"]:
+        noise: at.Float[at.Array, "b n k"] | None = None,
+    ) -> at.Float[at.Array, "b n k"]:
         """Sample a trace from the trace expert (planning mode).
 
         At inference, ``observation.images`` should be the *clean* base image
         (no overlay), and ``semantic_target_xy``/``current_ee_xy`` must be provided.
+
+        b: batch dimension
+        n: length of trace
+        k: dimension of trace (should be self.trace_dim)
         """
         observation = _trace_obs.preprocess_trace_observation(
             None, observation, train=False, image_keys=list(observation.images.keys())
@@ -837,7 +856,7 @@ class Pi0TraceVLA(_model.BaseModel):
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, L, self.trace_dim))
 
-        target_xy = observation.semantic_target_xy
+        target = observation.semantic_target_xy
         ee = observation.current_ee_xy
         skill_id = observation.atomic_token.astype(jnp.int32)
         skill_one_hot = jax.nn.one_hot(skill_id, self.num_trace_experts)
@@ -877,11 +896,11 @@ class Pi0TraceVLA(_model.BaseModel):
             x_t_row0 = (1.0 - time) * ee + time * fixed_eps_row0
             x_t = x_t.at[:, 0, :].set(x_t_row0)
             if append_anchor:
-                x_t_row_last = (1.0 - time) * target_xy + time * fixed_eps_row_last
+                x_t_row_last = (1.0 - time) * target + time * fixed_eps_row_last
                 x_t = x_t.at[:, -1, :].set(x_t_row_last)
 
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self._embed_trace_suffix(
-                x_t, jnp.broadcast_to(time, (batch_size,)), target_xy
+                x_t, jnp.broadcast_to(time, (batch_size,)), target
             )
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
             prefix_attn = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
@@ -905,12 +924,55 @@ class Pi0TraceVLA(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         # Defensive final clamps: at t=0, the inpainting math collapses the
-        # anchor rows exactly to ``ee`` and ``target_xy``; we re-assert that
+        # anchor rows exactly to ``ee`` and ``target``; we re-assert that
         # explicitly to absorb any accumulated float drift.
         x_0 = x_0.at[:, 0, :].set(ee)
         if append_anchor:
-            x_0 = x_0.at[:, -1, :].set(target_xy)
+            x_0 = x_0.at[:, -1, :].set(target)
             # Strip the anchor row before returning: callers want the actual
             # (N, 2) trace polyline, not the (N+1, 2) extended sequence.
             x_0 = x_0[:, :self.trace_horizon, :]
         return x_0
+
+class Pi0TraceVLA3D(Pi0TraceVLA):
+    
+    def __init__(self, config: _config.Pi0TraceVLAConfig, rngs: nnx.Rngs):
+        assert config.trace_dim == 3, "Pi0TraceVLA3D should have 3D trace"
+        assert config.target_dim == 3, "Pi0TraceVLA3D should have 3D target"
+        super().__init__(config, rngs)
+        if config.share_trace_embedder:
+            assert self.trace_width == self.action_width, "Sharing trace embedder requires the action and trace latent spaces to have the same dimension"
+            self.action_trace_in_proj = self.trace_in_proj
+        else:
+            self.action_trace_in_proj = nnx.Linear(self.trace_dim, self.action_width, rngs=rngs)
+
+
+
+    @at.typecheck
+    def _embed_action_suffix(
+        self,
+        noisy_actions: at.Float[at.Array, "b ah ad"],
+        trace_3d: at.Float[at.Array, "b t 3"],
+        timestep: at.Float[at.Array, " b"],
+    ) -> tuple[
+        at.Float[at.Array, "b s emb"],
+        at.Bool[at.Array, "b s"],
+        at.Bool[at.Array, "b s"],
+        at.Float[at.Array, "b emb"],
+    ]:
+        action_tokens, action_mask, action_ar_mask, adarms_cond = super()._embed_action_suffix(noisy_actions, trace_3d, timestep)
+
+        trace_tokens = self.action_trace_in_proj(trace_3d)
+        trace_mask = jnp.ones(trace_tokens.shape[:2], dtype=jnp.bool_)
+        # Two separate blocks: Trace tokens and action tokens. Each can attend to themselves
+        trace_ar_mask = jnp.broadcast_to(
+            jnp.array([True] + ([False] * (trace_tokens.shape[1] - 1))),
+            trace_tokens.shape[:2],
+        )
+        return (
+            jnp.concatenate([trace_tokens, action_tokens], axis=1),
+            jnp.concatenate([trace_mask, action_mask], axis=1),
+            jnp.concatenate([trace_ar_mask, action_ar_mask], axis=1),
+            adarms_cond
+        )
+

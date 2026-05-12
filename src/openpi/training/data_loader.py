@@ -150,8 +150,12 @@ def create_torch_dataset(
         # Used both by training (`train_trace_vla.py`) — though that script imports the
         # dataset directly — and by `compute_norm_stats.py`, which calls this factory to
         # iterate the trace dataset's `state`/`actions` for norm-stat computation.
-        from openpi.policies.libero_trace_dataset import LiberoTraceDataset
-        return LiberoTraceDataset(data_config, action_horizon)
+        if data_config.use_3d:
+            from openpi.policies.libero_trace_dataset import LiberoTrace3DDataset
+            return LiberoTrace3DDataset(data_config, action_horizon)
+        else:
+            from openpi.policies.libero_trace_dataset import LiberoTraceDataset
+            return LiberoTraceDataset(data_config, action_horizon)
 
     if isinstance(data_config, _config.AtomicCalvinDataConfig):
         from openpi.policies.calvin_dataset import AtomicCalvinDataset

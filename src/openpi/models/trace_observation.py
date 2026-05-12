@@ -42,15 +42,15 @@ class TraceObservation(_model.Observation, Generic[ArrayT]):
     """Observation for the TraceVLA model."""
 
     atomic_token: at.Float[ArrayT, "*b"] | None = None
-    semantic_target_xy: at.Float[ArrayT, "*b 2"] | None = None
-    current_ee_xy: at.Float[ArrayT, "*b 2"] | None = None
+    semantic_target_xy: at.Float[ArrayT, "*b k"] | None = None
+    current_ee_xy: at.Float[ArrayT, "*b k"] | None = None
     has_trace: at.Bool[ArrayT, "*b"] | None = None
     has_overlay: at.Bool[ArrayT, "*b"] | None = None
     progress: at.Float[ArrayT, "*b"] | None = None
     diffusion_loss_mask: at.Bool[ArrayT, "*b"] | None = None
 
     # Resampled GT trace target for the trace flow-matching loss.
-    future_trace_xy: at.Float[ArrayT, "*b n 2"] | None = None
+    future_trace_xy: at.Float[ArrayT, "*b n k"] | None = None
 
     # Overlay images (only `base_0_rgb` typically): used for execution-mode forward pass.
     # Wrist images are reused from `images`.
@@ -152,9 +152,9 @@ def preprocess_trace_observation(
                 img = _img_tools.resize_with_pad(img, *image_resolution)
             raw_overlay[key] = img
 
-    sem_xy = observation.semantic_target_xy
-    cur_ee_xy = observation.current_ee_xy
-    future_trace_xy = observation.future_trace_xy
+    sem_full = observation.semantic_target_xy
+    cur_ee_full = observation.current_ee_xy
+    future_trace_full = observation.future_trace_xy
 
     # ---- Step 2: training-time augmentation. ----
     if train and rng is not None:
@@ -173,14 +173,15 @@ def preprocess_trace_observation(
         B = raw_images[_BASE_IMAGE_KEY].shape[0]
         sub_rngs = jax.random.split(rng, B)
 
+        sem_xy = sem_full[..., :2]
+        cur_ee_xy = cur_ee_full[..., :2]
+        future_trace_xy = future_trace_full[..., :2]
         scale = jnp.asarray([W - 1, H - 1], dtype=jnp.float32)
 
         # ---- 2a. Geometric + color chain on base + overlay + keypoints ----
-        has_keypoints = (
-            sem_xy is not None and cur_ee_xy is not None and future_trace_xy is not None
-        )
         has_overlay_base = raw_overlay is not None and _BASE_IMAGE_KEY in raw_overlay
 
+        has_keypoints = True
         if has_keypoints:
             geom_input_types = [augmax.InputType.IMAGE]                   # base
             if has_overlay_base:
@@ -196,9 +197,9 @@ def preprocess_trace_observation(
             )
 
             # Convert keypoints to pixel coordinates in [0, W-1] x [0, H-1].
-            sem_px = (sem_xy * scale)[:, None, :]              # (B, 1, 2)
-            ee_px = (cur_ee_xy * scale)[:, None, :]            # (B, 1, 2)
-            ft_px = future_trace_xy * scale                    # (B, N, 2)
+            sem_px = (sem_xy * scale)[:, None, :]              # (B, 1, K)
+            ee_px = (cur_ee_xy * scale)[:, None, :]            # (B, 1, K)
+            ft_px = future_trace_xy * scale                    # (B, N, K)
 
             inputs = [raw_images[_BASE_IMAGE_KEY]]
             if has_overlay_base:
@@ -219,9 +220,9 @@ def preprocess_trace_observation(
             ft_aug = outs[idx]
 
             # Back to normalized [0, 1], clamped to image bounds.
-            sem_xy = jnp.clip(sem_aug[:, 0, :] / scale, 0.0, 1.0)
-            cur_ee_xy = jnp.clip(ee_aug[:, 0, :] / scale, 0.0, 1.0)
-            future_trace_xy = jnp.clip(ft_aug / scale, 0.0, 1.0)
+            sem_full = sem_full.at[..., :2].set(jnp.clip(sem_aug[:, 0, :] / scale, 0.0, 1.0))
+            cur_ee_full = cur_ee_full.at[..., :2].set(jnp.clip(ee_aug[:, 0, :] / scale, 0.0, 1.0))
+            future_trace_full = future_trace_full.at[..., :2].set(jnp.clip(ft_aug / scale, 0.0, 1.0))
         else:
             # No keypoints provided — fall back to a plain image-only geom chain.
             base_chain = augmax.Chain(
@@ -279,13 +280,13 @@ def preprocess_trace_observation(
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
         atomic_token=observation.atomic_token,
-        semantic_target_xy=sem_xy,
-        current_ee_xy=cur_ee_xy,
+        semantic_target_xy=sem_full,
+        current_ee_xy=cur_ee_full,
         has_trace=observation.has_trace,
         has_overlay=observation.has_overlay,
         progress=observation.progress,
         diffusion_loss_mask=observation.diffusion_loss_mask,
-        future_trace_xy=future_trace_xy,
+        future_trace_xy=future_trace_full,
         overlay_images=overlay_images,
         overlay_image_masks=overlay_image_masks,
     )

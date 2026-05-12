@@ -133,7 +133,6 @@ class LiberoTraceDataConfig(DataConfig):
 
     seed: int = 42
     skill_annotations_path: str = ""
-    trace_annotations_path: str = ""
     use_wrist_image: bool = True
     is_computing_norm_stats: bool = False
     action_down_sample_steps: int = 1
@@ -141,6 +140,7 @@ class LiberoTraceDataConfig(DataConfig):
     # Trace head shape and resampling.
     trace_horizon: int = 20
     trace_resample_method: str = "arc_length"  # or "time_uniform"
+    use_3d: bool = False
 
     # Receding-horizon training: max anchor-age (in control steps).
     h_train_max: int = 15
@@ -1105,23 +1105,23 @@ _CONFIGS = [
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(
-                repo_path=REPO_ROOT/"data/orange_plate",
+                repo_path=REPO_ROOT/"data/simple_tasks",
                 prompt_from_task=True
             ),
             extra_delta_transform=False,
         ),
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
+            warmup_steps=1_000,
             peak_lr=5e-5,
-            decay_steps=1_000_000,
+            decay_steps=100_000,
             decay_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=1_000,
+        num_train_steps=10_000,
     ),
     # Libero 100 (libero_10 + libero_90), yilin wu edition
     TrainConfig(
@@ -1845,8 +1845,7 @@ _CONFIGS = [
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
-                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
-                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
                 use_wrist_image=True,
                 is_computing_norm_stats=False,
             ),
@@ -1889,8 +1888,7 @@ _CONFIGS = [
             base_config=LiberoTraceDataConfig(
                 repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
                 prompt_from_task=True,
-                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
-                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
                 use_wrist_image=True,
                 is_computing_norm_stats=False,
             ),
@@ -1909,6 +1907,68 @@ _CONFIGS = [
             max_token_len=200,
             trace_horizon=20,
             num_trace_experts=5,
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2e-4,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=40_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_3d_lora",
+        # LoRA finetune: gemma_2b_lora + gemma_300m_lora; trace expert and completion head are full FT.
+        model=__import__(
+            "openpi.models.pi0_trace_vla_config", fromlist=["Pi0TraceVLAConfig"]
+        ).Pi0TraceVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+            trace_expert_variant="trace_moe_gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_trace_experts=5,
+            trace_dim=3,    # 3D specification
+            target_dim=3
+        ),
+        data=LeRobotTraceVLADataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=REPO_ROOT/"data/libero-100",
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces_3d.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+                use_3d=True
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        # Compute the freeze filter from the matching model config.
+        freeze_filter=__import__(
+            "openpi.models.pi0_trace_vla_config", fromlist=["Pi0TraceVLAConfig"]
+        ).Pi0TraceVLAConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+            trace_expert_variant="trace_moe_gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_trace_experts=5,
+            trace_dim=3,    # 3D specification
+            target_dim=3
         ).get_freeze_filter(),
         ema_decay=None,
         batch_size=64,

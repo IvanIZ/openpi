@@ -63,54 +63,55 @@ def hard_route_one_hot(expert_ids: np.ndarray, num_experts: int = NUM_TRACE_EXPE
 # Trace resampling
 # ---------------------------------------------------------------------------
 
-def time_uniform_resample(trace_pixels: np.ndarray, n_out: int) -> np.ndarray:
+def time_uniform_resample(trace: np.ndarray, n_out: int) -> np.ndarray:
     """Pick `n_out` evenly-spaced indices along the time axis."""
-    trace_pixels = np.asarray(trace_pixels, dtype=np.float32)
-    t = trace_pixels.shape[0]
+    trace = np.asarray(trace, dtype=np.float32)
+    t = trace.shape[0]
     if t == 0:
         raise ValueError("Empty trace.")
     if t == 1:
-        return np.tile(trace_pixels[0:1], (n_out, 1))
+        return np.tile(trace[0:1], (n_out, 1))
     indices = np.linspace(0.0, t - 1.0, n_out)
     floor = np.floor(indices).astype(np.int64)
     ceil = np.minimum(floor + 1, t - 1)
     frac = (indices - floor)[:, None]
-    return (1.0 - frac) * trace_pixels[floor] + frac * trace_pixels[ceil]
+    return (1.0 - frac) * trace[floor] + frac * trace[ceil]
 
 
-def arc_length_resample(trace_pixels: np.ndarray, n_out: int) -> np.ndarray:
+def arc_length_resample(trace: np.ndarray, n_out: int) -> np.ndarray:
     """Resample a polyline to ``n_out`` arc-length-uniform waypoints."""
-    trace_pixels = np.asarray(trace_pixels, dtype=np.float32)
-    t = trace_pixels.shape[0]
+    trace = np.asarray(trace, dtype=np.float32)
+    t = trace.shape[0]
     if t == 0:
         raise ValueError("Empty trace.")
     if t == 1:
-        return np.tile(trace_pixels[0:1], (n_out, 1))
+        return np.tile(trace[0:1], (n_out, 1))
 
-    diffs = np.diff(trace_pixels, axis=0)
+    diffs = np.diff(trace, axis=0)
     seg_lengths = np.linalg.norm(diffs, axis=1)
     cumlen = np.concatenate([[0.0], np.cumsum(seg_lengths)])
     total = cumlen[-1]
 
     if total == 0.0:
-        return np.tile(trace_pixels[0:1], (n_out, 1))
+        return np.tile(trace[0:1], (n_out, 1))
 
     target_lens = np.linspace(0.0, total, n_out)
-    out = np.empty((n_out, 2), dtype=np.float32)
-    out[:, 0] = np.interp(target_lens, cumlen, trace_pixels[:, 0])
-    out[:, 1] = np.interp(target_lens, cumlen, trace_pixels[:, 1])
+    n_dims = trace.shape[1]
+    out = np.empty((n_out, n_dims), dtype=np.float32)
+    for i in range(n_dims):
+        out[:, i] = np.interp(target_lens, cumlen, trace[:, i])
     return out
 
 
 def resample_trace(
-    trace_pixels: np.ndarray,
+    trace: np.ndarray,
     n_out: int,
     method: Literal["arc_length", "time_uniform"] = "arc_length",
 ) -> np.ndarray:
     if method == "arc_length":
-        return arc_length_resample(trace_pixels, n_out)
+        return arc_length_resample(trace, n_out)
     if method == "time_uniform":
-        return time_uniform_resample(trace_pixels, n_out)
+        return time_uniform_resample(trace, n_out)
     raise ValueError(f"Unknown resample method: {method!r}")
 
 
@@ -311,8 +312,8 @@ def smooth_low_freq_perturb(
         [0, 1] — the polyline overlay rasterizer clips out-of-bounds pixels.
     """
     trace_xy_norm = np.asarray(trace_xy_norm, dtype=np.float32)
-    if trace_xy_norm.ndim != 2 or trace_xy_norm.shape[-1] != 2:
-        raise ValueError(f"Expected (N, 2) input, got shape {trace_xy_norm.shape}")
+    if trace_xy_norm.ndim != 2:
+        raise ValueError(f"Expected (N, K) input, got shape {trace_xy_norm.shape}")
     N = trace_xy_norm.shape[0]
     if N < 1 or max_sigma <= 0.0 or num_freqs <= 0:
         return trace_xy_norm.copy()
@@ -327,14 +328,12 @@ def smooth_low_freq_perturb(
     else:
         s = np.linspace(0.0, 1.0, N, dtype=np.float32)
 
-    perturb = np.zeros((N, 2), dtype=np.float32)
+    perturb = np.zeros(trace_xy_norm.shape, dtype=np.float32)
     for f in range(1, int(num_freqs) + 1):
         # Random amplitude per axis, decaying with frequency.
-        amp_x = float(rng.normal()) * sigma / float(f)
-        amp_y = float(rng.normal()) * sigma / float(f)
-        phase_x = float(rng.uniform(0.0, 2.0 * np.pi))
-        phase_y = float(rng.uniform(0.0, 2.0 * np.pi))
-        perturb[:, 0] += amp_x * np.sin(2.0 * np.pi * float(f) * s + phase_x)
-        perturb[:, 1] += amp_y * np.sin(2.0 * np.pi * float(f) * s + phase_y)
+        for k in range(perturb.shape[1]):
+            amp = float(rng.normal()) * sigma / float(f)
+            phase = float(rng.uniform(0.0, 2.0 * np.pi))
+            perturb[:, k] += amp * np.sin(2.0 * np.pi * float(f) * s + phase)
 
     return (trace_xy_norm + perturb).astype(trace_xy_norm.dtype)

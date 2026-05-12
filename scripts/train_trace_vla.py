@@ -272,7 +272,6 @@ def train_step(
 
 def _create_trace_data_loader(config: _config.TrainConfig, *, sharding: jax.sharding.Sharding | None, shuffle: bool, num_batches=None, seed: int = 0):
     """Build a TraceObservation-aware data loader using the existing TorchDataLoader."""
-    from openpi.policies.libero_trace_dataset import LiberoTraceDataset  # noqa: PLC0415
 
     if not isinstance(config.data, _config.LeRobotTraceVLADataConfig):
         raise TypeError(
@@ -281,7 +280,12 @@ def _create_trace_data_loader(config: _config.TrainConfig, *, sharding: jax.shar
     data_config = config.data.create(config.assets_dirs, config.model)
     logging.info(f"data_config: {data_config}")
 
-    dataset = LiberoTraceDataset(data_config, action_horizon=config.model.action_horizon)
+    if config.model.trace_dim == 3:
+        from openpi.policies.libero_trace_dataset import LiberoTrace3DDataset  # noqa: PLC0415
+        dataset = LiberoTrace3DDataset(data_config, action_horizon=config.model.action_horizon)
+    else:
+        from openpi.policies.libero_trace_dataset import LiberoTraceDataset  # noqa: PLC0415
+        dataset = LiberoTraceDataset(data_config, action_horizon=config.model.action_horizon)
     # Use the standard pipeline's norm-stats handling: norm stats must already be computed
     # via `python pace/openpi/scripts/compute_norm_stats.py --config-name trace_vla` (or
     # `trace_vla_lora`), which writes them under `assets/<repo_id>/`. If they are missing,

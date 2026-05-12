@@ -49,8 +49,11 @@ class Pi0TraceVLAConfig(_model.BaseModelConfig):
     # Trace head shape: (N, 2). N is the number of waypoints.
     trace_horizon: int = 20
     trace_dim: int = 2
+    target_dim: int = 2
     # Number of skill-specific experts in the trace MoE.
     num_trace_experts: int = 5
+    share_trace_embedder: bool = False  # True to share an embedder between embedding trace tokens for the
+                                        # trace generator, and the action generator.
 
     # When True, the trace stream is extended by one extra token whose value is
     # inpainting-clamped to the semantic target ``p_tgt`` (the same mechanism
@@ -82,10 +85,14 @@ class Pi0TraceVLAConfig(_model.BaseModelConfig):
         return _model.ModelType.PI05
 
     @override
-    def create(self, rng: at.KeyArrayLike) -> "Pi0TraceVLA":
-        from openpi.models.pi0_trace_vla import Pi0TraceVLA  # noqa: PLC0415
-
-        return Pi0TraceVLA(self, rngs=nnx.Rngs(rng))
+    def create(self, rng: at.KeyArrayLike) -> "Pi0TraceVLA3D":
+        print("Creating trace vla with trace dimension", self.trace_dim)
+        if self.trace_dim == 2:
+            from openpi.models.pi0_trace_vla import Pi0TraceVLA  # noqa: PLC0415
+            return Pi0TraceVLA(self, rngs=nnx.Rngs(rng))
+        else:
+            from openpi.models.pi0_trace_vla import Pi0TraceVLA3D # noqa: PLC0415
+            return Pi0TraceVLA3D(self, rngs=nnx.Rngs(rng))
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_trace_obs.TraceObservation, _model.Actions]:
@@ -109,8 +116,8 @@ class Pi0TraceVLAConfig(_model.BaseModelConfig):
                 token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
                 atomic_token=jax.ShapeDtypeStruct([batch_size], jnp.float32),
-                semantic_target_xy=jax.ShapeDtypeStruct([batch_size, 2], jnp.float32),
-                current_ee_xy=jax.ShapeDtypeStruct([batch_size, 2], jnp.float32),
+                semantic_target_xy=jax.ShapeDtypeStruct([batch_size, self.target_dim], jnp.float32),
+                current_ee_xy=jax.ShapeDtypeStruct([batch_size, self.trace_dim], jnp.float32),
                 has_trace=jax.ShapeDtypeStruct([batch_size], jnp.bool_),
                 has_overlay=jax.ShapeDtypeStruct([batch_size], jnp.bool_),
                 progress=jax.ShapeDtypeStruct([batch_size], jnp.float32),
