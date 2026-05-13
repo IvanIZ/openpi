@@ -653,6 +653,57 @@ class LeRobotTraceVLADataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotTraceVLAActionMoeDataConfig(DataConfigFactory):
+    """Data factory for the TraceVLA-actionmoe variant on LIBERO.
+
+    Mirror of :class:`LeRobotTraceVLADataConfig` — same dataset, same input/output
+    transforms, same overlay rendering. The only reason this is a separate factory
+    class is the runtime type check: it accepts a
+    :class:`pi0_trace_vla_actionmoe_config.Pi0TraceVLAActionMoeConfig` rather than
+    the original ``Pi0TraceVLAConfig``. The produced :class:`LiberoTraceDataConfig`
+    is identical in shape, so ``create_torch_dataset`` and ``compute_norm_stats``
+    work unchanged.
+    """
+
+    base_config: tyro.conf.Suppress[LiberoTraceDataConfig | None] = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        import openpi.policies.libero_trace_policy as libero_trace_policy  # noqa: PLC0415
+        from openpi.models import pi0_trace_vla_actionmoe_config as pi0_trace_vla_actionmoe_config  # noqa: PLC0415
+
+        if not isinstance(model_config, pi0_trace_vla_actionmoe_config.Pi0TraceVLAActionMoeConfig):
+            raise TypeError(
+                f"LeRobotTraceVLAActionMoeDataConfig expects a Pi0TraceVLAActionMoeConfig "
+                f"model_config, got {type(model_config).__name__}"
+            )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_trace_policy.LiberoTraceInputs(model_type=model_config.model_type)],
+            outputs=[libero_trace_policy.LiberoTraceOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                libero_trace_policy.TraceResizeImages(224, 224),
+                libero_trace_policy.TraceTokenizePrompt(
+                    _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    discrete_state_input=False,
+                ),
+                _transforms.PadStatesAndActions(model_config.action_dim),
+            ],
+        )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        return dataclasses.replace(
+            base,
+            repack_transforms=_transforms.Group(),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotAtomicDataConfig(DataConfigFactory):
     extra_delta_transform: bool = False
     @override
@@ -1410,6 +1461,52 @@ _CONFIGS = [
         save_interval=1_000,
         keep_period=2_000,
     ),
+    # Pi05 FULL finetuning with reasoning (Do What You Say) - LIBERO-100.
+    # Variant of `pi05_libero_reason_lora` that fine-tunes the entire pi05 base
+    # weights instead of adapting via LoRA. Drops the `_lora` Gemma variants and
+    # the freeze filter so PaliGemma backbone + action expert both train. All
+    # data / loss / reasoning settings match the LoRA variant.
+    # NOTE: batch_size=256 may be too large for full FT on a single node — tune
+    # batch_size (and possibly peak_lr) for your hardware.
+    TrainConfig(
+        name="pi05_libero_reason",
+        model=pi0_fuse.Pi0FuseConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            action_dim=32,
+            action_horizon=10,
+            max_token_len=415,
+            diffusion_loss_coeff=1.0,
+        ),
+        data=LeRobotLiberoReasonDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoReasonDataConfig(
+                prompt_from_task=False,
+                use_reasoning=True,
+                use_wrist_image=True,
+                use_history=False,
+                use_outdated_reasoning=True,
+                action_down_sample_steps=1,
+                reasoning_json_path=REPO_ROOT/'data/libero-100/cot_simple.json',
+                use_val_dataset=False,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ema_decay=0.999,
+        num_train_steps=100_000,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        wandb_enabled=True,
+        save_interval=5_000,
+        keep_period=10_000,
+    ),
     # Pi05 LoRA finetuning with reasoning - LIBERO-10 (smaller, for testing)
     TrainConfig(
         name="pi05_libero_10_reason_lora",
@@ -1909,6 +2006,113 @@ _CONFIGS = [
             max_token_len=200,
             trace_horizon=20,
             num_trace_experts=5,
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2e-4,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=40_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    # ============================================================
+    # TraceVLA-actionmoe (Pi0TraceVLAActionMoe) - full FT and LoRA.
+    # ============================================================
+    # Architectural swap vs. trace_vla: action expert is the 5-expert hard-routed
+    # MoE; trace expert is a single dense gemma_300m FFN. Everything else
+    # (conditioning, training tricks, dataset, transforms, completion head) is
+    # the same as the latest trace_vla.
+    TrainConfig(
+        name="trace_vla_actionmoe",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_actionmoe_config", fromlist=["Pi0TraceVLAActionMoeConfig"]
+        ).Pi0TraceVLAActionMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",   # 5-expert MoE for actions
+            trace_expert_variant="gemma_300m",              # single dense FFN for traces
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+        ),
+        data=LeRobotTraceVLAActionMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=str(REPO_ROOT / "data/libero-100"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=200_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_actionmoe_lora",
+        # LoRA on paligemma 2B only. Action MoE + trace single FFN + completion head are full FT.
+        model=__import__(
+            "openpi.models.pi0_trace_vla_actionmoe_config", fromlist=["Pi0TraceVLAActionMoeConfig"]
+        ).Pi0TraceVLAActionMoeConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+        ),
+        data=LeRobotTraceVLAActionMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=str(REPO_ROOT / "data/libero-100"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        freeze_filter=__import__(
+            "openpi.models.pi0_trace_vla_actionmoe_config", fromlist=["Pi0TraceVLAActionMoeConfig"]
+        ).Pi0TraceVLAActionMoeConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="gemma_300m",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
         ).get_freeze_filter(),
         ema_decay=None,
         batch_size=64,
