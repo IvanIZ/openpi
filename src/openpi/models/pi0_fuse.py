@@ -42,6 +42,33 @@ class Pi0Fuse(Pi0):
         super().__init__(config, rngs)
         self.diffusion_loss_coeff = config.diffusion_loss_coeff
 
+    def embed_prefix(self, obs):
+        # Per-sample `ar_mask` version of `Pi0.embed_prefix`. `Pi0.embed_prefix`
+        # collapses the text `ar_mask` to sample 0 only (`obs.token_ar_mask[0]`)
+        # and returns a 1-D `[total_seq]` mask broadcast over the batch, which is
+        # wrong for Fuse: each sample has its own prefix/suffix boundary (action
+        # mode = 1-token suffix, reasoning mode = multi-token suffix starting at
+        # a different position). Return a 2-D `[B, total_seq]` mask instead.
+        input_mask = []
+        ar_mask = []
+        tokens = []
+        for name in obs.images:
+            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            tokens.append(image_tokens)
+            m = einops.repeat(obs.image_masks[name], "b -> b s", s=image_tokens.shape[1])
+            input_mask.append(m)
+            ar_mask.append(jnp.zeros_like(m, dtype=jnp.int32))
+
+        txt_emb = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
+        tokens.append(txt_emb)
+        input_mask.append(obs.tokenized_prompt_mask)
+        ar_mask.append(obs.token_ar_mask.astype(jnp.int32))
+
+        tokens = jnp.concatenate(tokens, axis=1)
+        input_mask = jnp.concatenate(input_mask, axis=1)
+        ar_mask = jnp.concatenate(ar_mask, axis=1)
+        return tokens, input_mask, ar_mask
+
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.FuseObservation, actions: _model.Actions, *, train: bool = False
@@ -63,7 +90,9 @@ class Pi0Fuse(Pi0):
         action_tokens, action_mask, action_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
 
         input_mask = jnp.concatenate([img_txt_mask, action_mask], axis=1)
-        ar_mask = jnp.concatenate([img_txt_ar_mask, action_ar_mask], axis=0)
+        B = img_txt_ar_mask.shape[0]
+        action_ar_mask = jnp.broadcast_to(action_ar_mask, (B, action_ar_mask.shape[-1]))
+        ar_mask = jnp.concatenate([img_txt_ar_mask, action_ar_mask], axis=1)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
 
