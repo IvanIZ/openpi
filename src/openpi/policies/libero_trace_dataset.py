@@ -527,8 +527,8 @@ class LiberoTrace3DDataset(LiberoTraceDataset):
         sem_pt_pixel = sem["point"]  # [x, y]
         sem_target_xyd_normalized = np.array(
             [
-                sem_pt_pixel[0] / self.trace_image_w - 1,
-                sem_pt_pixel[1] / self.trace_image_h - 1,
+                sem_pt_pixel[0] / (self.trace_image_w - 1),
+                sem_pt_pixel[1] / (self.trace_image_h - 1),
                 sem["depth"]
             ],
             dtype=np.float32,
@@ -564,7 +564,7 @@ class LiberoTrace3DDataset(LiberoTraceDataset):
             trace_projected = (world_to_cam_px @ trace_homogenous.T).T
             trace_xyd = np.zeros((n, 3))
             # Divide by z coordinate to get back pixels
-            trace_xyd[:, :2] = trace_3d[:, :2] / trace_3d[:, 2:3]
+            trace_xyd[:, :2] = trace_projected[:, :2] / trace_projected[:, 2:3]
             trace_xyd[:, 2] = trace_in_cam_frame[:, 2]
             # Flip the x coordinate by convention...
             return np.stack([

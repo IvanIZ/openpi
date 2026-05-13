@@ -612,6 +612,7 @@ class Pi0TraceVLA(_model.BaseModel):
         observation = _trace_obs.preprocess_trace_observation(
             None, observation, train=False, image_keys=list(observation.images.keys())
         )
+        future_trace = obseration.future_trace_xy
 
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
@@ -644,7 +645,7 @@ class Pi0TraceVLA(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self._embed_action_suffix(
-                x_t, jnp.broadcast_to(time, (batch_size,))
+                x_t, future_trace, jnp.broadcast_to(time, (batch_size,))
             )
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
             prefix_attn = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
@@ -701,6 +702,7 @@ class Pi0TraceVLA(_model.BaseModel):
         observation = _trace_obs.preprocess_trace_observation(
             None, observation, train=False, image_keys=list(observation.images.keys())
         )
+        future_trace = observation.future_trace_xy  # (B, N, K)
 
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
@@ -746,7 +748,7 @@ class Pi0TraceVLA(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self._embed_action_suffix(
-                x_t, jnp.broadcast_to(time, (batch_size,))
+                x_t, future_trace, jnp.broadcast_to(time, (batch_size,))
             )
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
             prefix_attn = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
