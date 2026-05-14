@@ -70,6 +70,8 @@ Variant = Literal[
     "trace_moe_dummy",
     "trace_moe_gemma_300m",  # full FT trace expert (1024 width, 18 layers, 5 experts)
     "trace_moe_gemma_300m_lora",  # LoRA variant (LoRA on attn+ffn)
+    "trace_moe_small",  # shrunk MoE for combined-MoE variant: 512 width, 2048 mlp, 5 experts
+    "trace_moe_small_dummy",  # tiny version of trace_moe_small for sandbox tests
 ]
 
 
@@ -114,6 +116,36 @@ def get_trace_config(variant: Variant) -> Config:
                 "attn": lora.LoRAConfig(rank=32, alpha=32.0),
                 "ffn": lora.LoRAConfig(rank=32, alpha=32.0),
             },
+        )
+    if variant == "trace_moe_small":
+        # Recipe C from traceVLA_moe_design.md: half-width, half-mlp_dim trace MoE
+        # used in the combined-MoE variant (Pi0TraceVLAMoe). Both width and mlp_dim
+        # are halved vs `trace_moe_gemma_300m`; depth, head shape, and K are locked
+        # by the joint-attention asserts and the 5-skill routing semantics.
+        # Trace MoE FFN params: 18 * 5 * 3 * 512 * 2048 ≈ 283 M (down from 1.13 B).
+        return Config(
+            width=512,
+            depth=18,
+            mlp_dim=2048,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+            num_local_experts=5,
+            num_experts_per_tok=1,
+        )
+    if variant == "trace_moe_small_dummy":
+        # Sandbox-test dummy for `trace_moe_small`. Same shape contracts (different
+        # `width`/`mlp_dim` from the action-stream `trace_moe_dummy`) so we can
+        # exercise the joint-attention asserts with both streams MoE.
+        return Config(
+            width=32,
+            depth=4,
+            mlp_dim=64,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=16,
+            num_local_experts=5,
+            num_experts_per_tok=1,
         )
     raise ValueError(f"Unknown trace variant: {variant}")
 
