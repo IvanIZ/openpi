@@ -47,8 +47,19 @@ def main(config: _config.TrainConfig):
     rng = jax.random.key(config.seed)
 
     ds = get_dataset(config)
-    print('future_trace_xy:', ds[0]['future_trace_xy'])
-    print('semantic_target_xy:', ds[0]['semantic_target_xy'])
+    seen_skills = set()
+    for i in range(len(ds)):
+        entry = ds[i]
+        if entry['prompt'] == "put both the alphabet soup and the tomato sauce in the basket":
+            skill_text = entry['skill_text']
+            if skill_text in seen_skills:
+                continue
+            seen_skills.add(skill_text)
+            print("Index", i)
+            print("Plan:", entry['plan_text'])
+            print("Skill:", skill_text)
+            print('future_trace_xy:', entry['future_trace_xy'])
+            print('semantic_target_xy:', entry['semantic_target_xy'])
 
 if __name__ == "__main__":
     main(_config.cli())
