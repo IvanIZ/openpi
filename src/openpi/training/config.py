@@ -2525,6 +2525,47 @@ _CONFIGS = [
         wandb_enabled=True,
     ),
     TrainConfig(
+        name="target_vla_actionmoe_real",
+        model=__import__(
+            "openpi.models.pi0_target_vla_actionmoe_config", fromlist=["Pi0TargetVLAActionMoeConfig"]
+        ).Pi0TargetVLAActionMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",   # 5-expert MoE for actions
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            num_action_experts=5,
+        ),
+        data=LeRobotTargetVLAActionMoeDataConfig(
+            repo_id="n5zhong/table_tasks",
+            base_config=LiberoTargetDataConfig(
+                repo_path=str(REPO_ROOT / "data/table_tasks"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/table_tasks/tabletask_skill_target_traces.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/table_tasks/tabletask_skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
         name="target_vla_actionmoe_lora",
         # LoRA on paligemma 2B only. Action MoE + completion head are full FT.
         model=__import__(
