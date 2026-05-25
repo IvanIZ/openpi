@@ -67,6 +67,7 @@ class Config:
 Variant = Literal[
     "dummy",
     "gemma_300m",
+    "gemma_trace_small",  # dense single-head trace expert (512 width, 2048 mlp) for trace_vla_single
     "gemma_2b",
     "gemma_2b_lora",
     "gemma_300m_lora",
@@ -93,6 +94,21 @@ def get_config(variant: Variant) -> Config:
             width=1024,
             depth=18,
             mlp_dim=4096,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+        )
+    if variant == "gemma_trace_small":
+        # Dense single-head trace expert for the ``trace_vla_single`` ablation.
+        # Same shape as one expert of ``gemmoe_trace.trace_moe_small`` (Recipe C:
+        # width=512, mlp_dim=2048) but a single dense FFN (num_local_experts=1) — i.e.
+        # the MoE-free counterpart of the ``trace_vla_moe`` trace stream. depth, head
+        # shape are locked by the joint-attention asserts against ``gemma_2b``. Randomly
+        # initialized at train start (its shape does not match pi05_base's action FFN).
+        return Config(
+            width=512,
+            depth=18,
+            mlp_dim=2048,
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,

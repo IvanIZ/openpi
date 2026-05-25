@@ -777,6 +777,55 @@ class LeRobotTraceVLAMoeDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotTraceVLASingleDataConfig(DataConfigFactory):
+    """Data factory for the MoE-free (single-head) TraceVLA variant on LIBERO.
+
+    Mirror of :class:`LeRobotTraceVLAMoeDataConfig`: same dataset, same transforms,
+    same overlay rendering. Separate class only so the runtime type check binds to
+    :class:`pi0_trace_vla_single_config.Pi0TraceVLASingleConfig`. The produced
+    :class:`LiberoTraceDataConfig` is identical in shape to ``trace_vla_moe``'s, so
+    ``create_torch_dataset`` and ``compute_norm_stats`` work unchanged.
+    """
+
+    base_config: tyro.conf.Suppress[LiberoTraceDataConfig | None] = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        import openpi.policies.libero_trace_policy as libero_trace_policy  # noqa: PLC0415
+        from openpi.models import pi0_trace_vla_single_config as pi0_trace_vla_single_config  # noqa: PLC0415
+
+        if not isinstance(model_config, pi0_trace_vla_single_config.Pi0TraceVLASingleConfig):
+            raise TypeError(
+                f"LeRobotTraceVLASingleDataConfig expects a Pi0TraceVLASingleConfig "
+                f"model_config, got {type(model_config).__name__}"
+            )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_trace_policy.LiberoTraceInputs(model_type=model_config.model_type)],
+            outputs=[libero_trace_policy.LiberoTraceOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                libero_trace_policy.TraceResizeImages(224, 224),
+                libero_trace_policy.TraceTokenizePrompt(
+                    _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    discrete_state_input=False,
+                ),
+                _transforms.PadStatesAndActions(model_config.action_dim),
+            ],
+        )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        return dataclasses.replace(
+            base,
+            repack_transforms=_transforms.Group(),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotTargetVLAActionMoeDataConfig(DataConfigFactory):
     """Data factory for the trace-free TargetVLA-ActionMoe variant on LIBERO.
 
@@ -2400,6 +2449,67 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=40_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    # ============================================================
+    # TraceVLA-single (Pi0TraceVLASingle) — MoE-free ablation of trace_vla_moe (full FT).
+    # ============================================================
+    # Ablation that isolates the benefit of the MoE structure on the trace + action
+    # generators. Identical to ``trace_vla_moe`` in every respect EXCEPT both non-VLM
+    # streams drop the 5-expert hard-routed MoE in favor of a single dense FFN:
+    #   - action head: single dense ``gemma_300m`` (width=1024, mlp_dim=4096) — i.e. one
+    #     expert of trace_vla_moe's ``trace_moe_gemma_300m`` action MoE. Warm-started
+    #     from pi05_base's ``mlp_1``.
+    #   - trace head:  single dense ``gemma_trace_small`` (width=512, mlp_dim=2048) — i.e.
+    #     one expert of trace_vla_moe's shrunk ``trace_moe_small`` trace MoE. Randomly
+    #     initialized (shape mismatch vs pi05_base), exactly like trace_vla_moe's trace MoE.
+    # The per-skill completion / progress head is KEPT as a skill-routed per-skill MLP
+    # (num_completion_experts=5) — it is not part of the ablation. Dataset, annotations,
+    # transforms, conditioning, losses, and all training tricks (anchor-age augmentation,
+    # scene/overlay dropout, trace perturbation, image augmentation) are identical to
+    # ``trace_vla_moe``. Full finetune only (no LoRA variant). Launch with
+    # ``scripts/train_trace_vla_single.py``.
+    TrainConfig(
+        name="trace_vla_single",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_single_config", fromlist=["Pi0TraceVLASingleConfig"]
+        ).Pi0TraceVLASingleConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",          # single dense FFN for actions (width 1024)
+            trace_expert_variant="gemma_trace_small",    # single dense FFN for traces (width 512, lightweight)
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_completion_experts=5,                    # per-skill completion head (only routed component)
+        ),
+        data=LeRobotTraceVLASingleDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path=str(REPO_ROOT / "data/libero-100"),
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
         save_interval=5_000,
         keep_period=10_000,
         log_interval=100,
