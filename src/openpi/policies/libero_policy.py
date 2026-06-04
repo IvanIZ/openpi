@@ -84,24 +84,6 @@ class LiberoInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class LiberoReasonInputs(LiberoInputs):
-    """Converts inputs for Pi0Fuse reasoning model. Handles thought field."""
-
-    model_type: _model.ModelType = _model.ModelType.PI0_FUSE
-
-    def __call__(self, data: dict) -> dict:
-        inputs = super().__call__(data)
-
-        if "thought" in data:
-            inputs["thought"] = data["thought"]
-            inputs["target"] = data.get("target")
-            inputs["act_with_outdated_thought"] = data.get("act_with_outdated_thought", False)
-            inputs["think_with_outdated_thought"] = data.get("think_with_outdated_thought", False)
-
-        return inputs
-
-
-@dataclasses.dataclass(frozen=True)
 class LiberoOutputs(transforms.DataTransformFn):
     """
     This class is used to convert outputs from the model back the the dataset specific format. It is

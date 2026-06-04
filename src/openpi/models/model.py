@@ -33,7 +33,6 @@ class ModelType(enum.Enum):
     PI0 = "pi0"
     PI0_FAST = "pi0_fast"
     PI05 = "pi05"
-    PI0_FUSE = "pi0_fuse"
 
 
 # The model always expects these images
@@ -137,63 +136,6 @@ class Observation(Generic[ArrayT]):
         return result
 
 
-@at.typecheck
-@struct.dataclass
-class FuseObservation(Observation):
-    """Extended observation for models with joint text+action loss (pi0_fuse)."""
-
-    diffusion_loss_mask: at.Bool[ArrayT, "*b"] | None = None
-
-    @classmethod
-    def from_dict(cls, data: at.PyTree[ArrayT]) -> "FuseObservation[ArrayT]":
-        if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
-            raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
-        for key in data["image"]:
-            if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
-                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
-        return cls(
-            images=data["image"],
-            image_masks=data["image_mask"],
-            state=data["state"],
-            tokenized_prompt=data.get("tokenized_prompt"),
-            tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
-            token_ar_mask=data.get("token_ar_mask"),
-            token_loss_mask=data.get("token_loss_mask"),
-            diffusion_loss_mask=data.get("diffusion_loss_mask"),
-        )
-
-
-@at.typecheck
-@struct.dataclass
-class AtomicObservation(Observation):
-    """Observation for the pi0_atomic model with atomic skill conditioning."""
-
-    diffusion_loss_mask: at.Bool[ArrayT, "*b"] | None = None
-    atomic_token: at.Float[ArrayT, "*b"] | None = None
-
-    @classmethod
-    def from_dict(cls, data: at.PyTree[ArrayT]) -> "AtomicObservation[ArrayT]":
-        if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
-            raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
-        for key in data["image"]:
-            if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
-                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
-        return cls(
-            images=data["image"],
-            image_masks=data["image_mask"],
-            state=data["state"],
-            tokenized_prompt=data.get("tokenized_prompt"),
-            tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
-            token_ar_mask=data.get("token_ar_mask"),
-            token_loss_mask=data.get("token_loss_mask"),
-            diffusion_loss_mask=data.get("diffusion_loss_mask"),
-            atomic_token=data.get("atomic_token"),
-        )
-
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
@@ -202,12 +144,12 @@ Actions = at.Float[ArrayT, "*b ah ad"]
 
 def preprocess_observation(
     rng: at.KeyArrayLike | None,
-    observation: Observation | FuseObservation | AtomicObservation,
+    observation: Observation,
     *,
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
-) -> Observation | FuseObservation | AtomicObservation:
+) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
     """
@@ -265,14 +207,6 @@ def preprocess_observation(
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
     )
-    if isinstance(observation, AtomicObservation):
-        return AtomicObservation(
-            **common_kwargs,
-            diffusion_loss_mask=observation.diffusion_loss_mask,
-            atomic_token=observation.atomic_token,
-        )
-    if isinstance(observation, FuseObservation):
-        return FuseObservation(**common_kwargs, diffusion_loss_mask=observation.diffusion_loss_mask)
     return Observation(**common_kwargs)
 
 

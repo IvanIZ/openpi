@@ -15,7 +15,6 @@ import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
-import openpi.policies.atomic_dataset as atomic_dataset 
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -138,14 +137,6 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    if isinstance(data_config, _config.LiberoReasonDataConfig):
-        from openpi.policies.libero_reason_dataset import LiberoReasonDataset
-        return LiberoReasonDataset(data_config, action_horizon)
-    
-    if isinstance(data_config, _config.LiberoSkillReasonDataConfig):
-        from openpi.policies.libero_reason_dataset import LiberoSkillReasonDataset
-        return LiberoSkillReasonDataset(data_config, action_horizon)
-
     if isinstance(data_config, _config.LiberoTraceDataConfig):
         # Trace dataset: consumed by the standard training path (`train.py` ->
         # `create_data_loader` -> `DataLoaderImpl` yields `TraceObservation`) and by
@@ -160,39 +151,22 @@ def create_torch_dataset(
         from openpi.policies.libero_target_dataset import LiberoTargetDataset
         return LiberoTargetDataset(data_config, action_horizon)
 
-    if isinstance(data_config, _config.AtomicCalvinDataConfig):
-        from openpi.policies.calvin_dataset import AtomicCalvinDataset
-        return AtomicCalvinDataset(data_config, action_horizon)
-    
     if isinstance(data_config, _config.CalvinDataConfig):
         from openpi.policies.calvin_dataset import CalvinDataset
         return CalvinDataset(data_config, action_horizon)
 
     dataset_meta_root = data_config.repo_path
-    if isinstance(data_config, _config.AtomicDataConfig):
-        dataset_meta_root = atomic_dataset.resolve_dataset_root(repo_id, data_config.repo_path) or data_config.repo_path
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=dataset_meta_root)
     
-    if isinstance(data_config, _config.AtomicDataConfig):
-        print("Data Loader Info: using Atomic_Dataset...")
-        dataset = atomic_dataset.Atomic_Dataset(
-            data_config,
-            model_config.action_horizon,
-            delta_timestamps={
-                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-            },
-        )
-
-    else:
-        print("Data Loader Info: using default LeRobotDataset...")
-        dataset = lerobot_dataset.LeRobotDataset(
-            data_config.repo_id,
-            root=data_config.repo_path,
-            delta_timestamps={
-                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-            },
-        )
+    print("Data Loader Info: using default LeRobotDataset...")
+    dataset = lerobot_dataset.LeRobotDataset(
+        data_config.repo_id,
+        root=data_config.repo_path,
+        delta_timestamps={
+            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+        },
+    )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -582,8 +556,6 @@ class DataLoaderImpl(DataLoader):
         self._data_loader = data_loader
         self._use_target_observation = isinstance(data_config, _config.LiberoTargetDataConfig)
         self._use_trace_observation = isinstance(data_config, _config.LiberoTraceDataConfig)
-        self._use_fuse_observation = isinstance(data_config, _config.LiberoReasonDataConfig)
-        self._use_atomic_observation = isinstance(data_config, _config.AtomicDataConfig)
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config
@@ -601,9 +573,5 @@ class DataLoaderImpl(DataLoader):
                 from openpi.models import trace_observation as _trace_obs  # noqa: PLC0415
 
                 yield _trace_obs.TraceObservation.from_dict(batch), batch["actions"]
-            elif self._use_atomic_observation or "atomic_token" in batch:
-                yield _model.AtomicObservation.from_dict(batch), batch["actions"]
-            elif self._use_fuse_observation or "diffusion_loss_mask" in batch:
-                yield _model.FuseObservation.from_dict(batch), batch["actions"]
             else:
                 yield _model.Observation.from_dict(batch), batch["actions"]

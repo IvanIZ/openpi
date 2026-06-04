@@ -21,7 +21,6 @@ REPO_ROOT = OPENPI_ROOT / '..' / '..'
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
-import openpi.models.pi0_fuse as pi0_fuse
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
@@ -29,8 +28,6 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
-import openpi.training.misc.polaris_config as polaris_config
-import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -222,17 +219,6 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            case _model.ModelType.PI0_FUSE:
-                return _transforms.Group(
-                    inputs=[
-                        _transforms.ResizeImages(224, 224),
-                        _transforms.FuseTokenizePrompt(
-                            _tokenizer.FusePaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=True,
-                        ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
-                    ],
-                )
             case _model.ModelType.PI0_FAST:
                 tokenizer_cls = (
                     _tokenizer.FASTTokenizer
@@ -388,7 +374,6 @@ class CalvinDataConfig(DataConfig):
     norm_stats_dir: str = ""
 
 
-
 @dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
     """
@@ -430,7 +415,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
         )
 
@@ -461,77 +446,6 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
-            data_transforms=data_transforms,
-            model_transforms=model_transforms,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class LiberoReasonDataConfig(DataConfig):
-    """Extended data config for LIBERO with reasoning annotations."""
-    action_down_sample_steps: int = 1
-    getitem_type: str = "necessary"
-    use_reasoning: bool = True
-    use_wrist_image: bool = True
-    use_history: bool = False
-    use_outdated_reasoning: bool = True
-    is_computing_norm_stats: bool = False
-    reasoning_json_path: str | None = None
-    use_val_dataset: bool = True
-    val_ratio: float = 0.1
-    create_train_val_split: bool = False
-    seed: int = 42
-    norm_stats_dir: str = ""
-
-@dataclasses.dataclass(frozen=True)
-class LiberoSkillReasonDataConfig (DataConfig):
-    """Extended data config for LIBERO with reasoning annotations."""
-    action_down_sample_steps: int = 1
-    getitem_type: str = "necessary"
-    use_reasoning: bool = True
-    use_wrist_image: bool = True
-    use_history: bool = False
-    use_outdated_reasoning: bool = True
-    is_computing_norm_stats: bool = False
-    reasoning_json_path: str | None = None
-    use_val_dataset: bool = True
-    val_ratio: float = 0.1
-    create_train_val_split: bool = False
-    seed: int = 42
-    norm_stats_dir: str = ""
-
-
-@dataclasses.dataclass(frozen=True)
-class LeRobotLiberoReasonDataConfig(DataConfigFactory):
-    """Data config factory for LIBERO with reasoning annotations (for Pi0Fuse)."""
-
-    #base_config: tyro.conf.Suppress[LiberoReasonDataConfig | DataConfig | None] = None
-
-    @override
-    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # Why is this the reverse of the Libero config?
-        data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoReasonInputs(model_type=model_config.model_type)],
-            outputs=[libero_policy.LiberoOutputs()],
-        )
-
-        model_transforms = _transforms.Group(
-            inputs=[
-                _transforms.ResizeImages(224, 224),
-                _transforms.FuseTokenizePrompt(
-                    _tokenizer.FusePaligemmaTokenizer(model_config.max_token_len),
-                    discrete_state_input=True,
-                ),
-                _transforms.PadStatesAndActions(model_config.action_dim),
-            ],
-        )
-
-        base = self.create_base_config(assets_dirs, model_config)
-        if base.norm_stats is None:
-            base = dataclasses.replace(base, norm_stats={})
-        return dataclasses.replace(
-            base,
-            repack_transforms=_transforms.Group(),
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
@@ -1147,12 +1061,11 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
-    # Libero 100 (libero_10 + libero_90), yilin wu edition
     TrainConfig(
         name="pi05_libero_100",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
         data=LeRobotLiberoDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=DataConfig(
                 repo_path=REPO_ROOT/"data/libero-100",
                 prompt_from_task=True
@@ -1397,7 +1310,7 @@ _CONFIGS = [
             num_trace_experts=5,
         ),
         data=LeRobotTraceVLADataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1446,7 +1359,7 @@ _CONFIGS = [
             num_trace_experts=5,
         ),
         data=LeRobotTraceVLADataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1515,7 +1428,7 @@ _CONFIGS = [
             num_action_experts=5,
         ),
         data=LeRobotTraceVLAActionMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1564,7 +1477,7 @@ _CONFIGS = [
             num_action_experts=5,
         ),
         data=LeRobotTraceVLAActionMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1636,7 +1549,7 @@ _CONFIGS = [
             num_trace_experts=5,
         ),
         data=LeRobotTraceVLAMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1683,7 +1596,7 @@ _CONFIGS = [
             num_trace_experts=5,
         ),
         data=LeRobotTraceVLAMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTraceDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1726,24 +1639,7 @@ _CONFIGS = [
         log_interval=100,
         wandb_enabled=True,
     ),
-    # ============================================================
     # TraceVLA combined-MoE on the physical-robot table-tasks dataset (full FT).
-    # ============================================================
-    # Mirror of ``trace_vla_moe`` (full FT, both action + trace streams are hard-routed
-    # MoE), retargeted from LIBERO to the physical-robot ``n5zhong/table_tasks`` dataset.
-    # Only the dataset-driven essentials change vs ``trace_vla_moe``:
-    #   - K=2 skill experts instead of 5 (the 3 table-task skills PICKUP_FROM / PLACE_ON /
-    #     PLACE_IN route onto 2 experts per ``embed_sigma`` / ``trace_utils.skill_to_expert_id``:
-    #     PICKUP_FROM -> 0, PLACE_ON/PLACE_IN -> 1). Both MoE streams use the new 2-expert
-    #     variants (``trace_moe_gemma_300m_2e`` / ``trace_moe_small_2e``).
-    #   - dataset = ``n5zhong/table_tasks`` + the table-task skill/trace annotations.
-    # The table_tasks images are stored as MP4 ``video`` features (vs LIBERO's in-parquet
-    # ``image`` features); ``LiberoTraceDataset`` decodes them transparently (guarded by
-    # ``self.meta.video_keys``). Trace coords live in the per-episode 640x480 space recorded
-    # in the trace annotations, and are normalized to [0, 1] before overlay/supervision —
-    # so the 480x640 camera resolution needs no special handling. All conditioning, training
-    # tricks (anchor-age augmentation, scene/overlay dropout, trace perturbation, image
-    # augmentation), completion head, and losses are identical to ``trace_vla_moe``.
     TrainConfig(
         name="trace_vla_moe_table_tasks",
         model=__import__(
@@ -1818,7 +1714,7 @@ _CONFIGS = [
             num_action_experts=5,
         ),
         data=LeRobotTargetVLAActionMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTargetDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,
@@ -1862,7 +1758,7 @@ _CONFIGS = [
             num_action_experts=5,
         ),
         data=LeRobotTargetVLAActionMoeDataConfig(
-            repo_id="yilin-wu/libero-100",
+            repo_id="libero-100",
             base_config=LiberoTargetDataConfig(
                 repo_path=str(REPO_ROOT / "data/libero-100"),
                 prompt_from_task=True,

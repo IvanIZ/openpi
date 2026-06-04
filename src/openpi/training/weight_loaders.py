@@ -54,35 +54,6 @@ class CheckpointWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*lora.*")
 
 
-@dataclasses.dataclass(frozen=True)
-class AtomicWeightLoader(WeightLoader):
-    """Loads pi05_base into a Pi0Atomic model.
-
-    The atomic action expert is a Gemmoe sparse-MoE block whose shared expert
-    (``moe_1/expert_0``) keeps the dense GeGLU layout (``gating_einsum`` + ``linear``).
-    We copy pi05_base's dense action FFN (``mlp_1``) into that shared expert; the
-    extra atomic-skill experts, ``sigma_emb``, the reasoning head, and any LoRA
-    adapters are not present in pi05_base and are left at model init (back-filled
-    from the reference params, then kept by the training loop's overlay).
-    """
-
-    params_path: str
-
-    def load(self, params: at.Params) -> at.Params:
-        raw = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        flat = dict(flax.traverse_util.flatten_dict(raw, sep="/"))
-        for k in list(flat):
-            if k.endswith("mlp_1/gating_einsum"):
-                flat[k[: -len("mlp_1/gating_einsum")] + "moe_1/expert_0/gating_einsum"] = flat[k]
-            elif k.endswith("mlp_1/linear"):
-                flat[k[: -len("mlp_1/linear")] + "moe_1/expert_0/linear"] = flat[k]
-        remapped = flax.traverse_util.unflatten_dict(flat, sep="/")
-        # Keep only keys that exist in the model (drops the now-unused ``mlp_1``) and
-        # back-fill everything else (extra experts, sigma_emb, reasoning head, LoRA) from
-        # the reference params so the returned tree matches the model structure exactly.
-        return _merge_params(remapped, params, missing_regex=".*")
-
-
 _STREAM2_SUFFIX_PAIRS = [
     ("q_einsum_2", "q_einsum_1"),
     ("kv_einsum_2", "kv_einsum_1"),

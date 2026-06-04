@@ -245,52 +245,6 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class ExtractThoughts(DataTransformFn):
-    tokenizer: _tokenizer.AtomicPaligemmaTokenizer
-
-    def __call__(self, data: DataDict) -> DataDict:
-        if "tokenized_suffix" not in data:
-            return data
-        tokens = data["tokenized_suffix"]
-        thoughts = self.tokenizer.extract_thoughts(tokens)
-        return {**data, "thoughts": thoughts}
-
-
-@dataclasses.dataclass(frozen=True)
-class AtomicTokenizePrompt(DataTransformFn):
-    tokenizer: _tokenizer.AtomicPaligemmaTokenizer
-
-    def __call__(self, data: DataDict) -> DataDict:
-        prompt = data.pop("prompt", None)
-        in_prompt = prompt
-        thought = data.pop("thought", None)
-        if thought is not None:
-            thought[0] = in_prompt
-        else:
-            thought = [in_prompt]
-
-        if thought is None:
-            raise ValueError("Thought is required")
-        (
-            tokens,
-            token_mask,
-            ar_mask,
-            text_loss_mask,
-            diffusion_loss_mask,
-            atomic_token,
-        ) = self.tokenizer.tokenize(thought)
-
-        return {
-            **data,
-            "tokenized_prompt": tokens,
-            "tokenized_prompt_mask": token_mask,
-            "token_ar_mask": ar_mask,
-            "token_loss_mask": text_loss_mask,
-            "diffusion_loss_mask": diffusion_loss_mask,
-            "atomic_token": atomic_token,
-        }
-
-@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
@@ -310,53 +264,6 @@ class TokenizePrompt(DataTransformFn):
 
         tokens, token_masks = self.tokenizer.tokenize(prompt, state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
-
-
-@dataclasses.dataclass(frozen=True)
-class FuseTokenizePrompt(DataTransformFn):
-    """Tokenizes thought (prefix + suffix) for Pi0Fuse reasoning models."""
-    tokenizer: _tokenizer.FusePaligemmaTokenizer
-    discrete_state_input: bool = False
-
-    def __call__(self, data: DataDict) -> DataDict:
-        _ = data.pop("prompt", None)
-        thought = data.pop("thought", None)
-        target = data.pop("target", None)
-
-        if thought is None:
-            raise ValueError("Thought is required for FuseTokenizePrompt")
-
-        state = None
-        if self.discrete_state_input:
-            state = data.get("state", None)
-            if state is None:
-                raise ValueError("State is required for discrete state input.")
-
-        (
-            tokens,
-            token_mask,
-            ar_mask,
-            text_loss_mask,
-            diffusion_loss_mask,
-        ) = self.tokenizer.tokenize(
-            thought,
-            data.get('act_with_outdated_thought', False),
-            data.get('think_with_outdated_thought', False),
-            state=state,
-            target=target
-        )
-
-        data.pop('act_with_outdated_thought', None)
-        data.pop('think_with_outdated_thought', None)
-
-        return {
-            **data,
-            "tokenized_prompt": tokens,
-            "tokenized_prompt_mask": token_mask,
-            "token_ar_mask": ar_mask,
-            "token_loss_mask": text_loss_mask,
-            "diffusion_loss_mask": diffusion_loss_mask,
-        }
 
 
 @dataclasses.dataclass(frozen=True)
