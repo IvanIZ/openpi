@@ -1,6 +1,6 @@
 """Shared base for the TraceVLA model family.
 
-Home of the module-level helpers and (in later batches) ``TraceVLABase``, the shared trunk/head
+Home of the module-level helpers and ``TraceVLABase``, the shared trunk/head
 construction and embed/loss/sample machinery for:
 
   - Pi0TraceVLA          (trace stream = MoE, action stream = dense)
