@@ -77,6 +77,7 @@ class Config:
 Variant = Literal[
     "dummy",
     "gemma_300m",
+    "gemma_trace_small",
     "gemma_2b",
     "gemma_2b_lora",
     "gemma_300m_lora",
@@ -103,6 +104,18 @@ def get_config(variant: Variant) -> Config:
             width=1024,
             depth=18,
             mlp_dim=4096,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+        )
+    if variant == "gemma_trace_small":
+        # Dense, lightweight single trace expert for the ``trace_vla_single`` ablation.
+        # Same shape as one expert of ``gemmoe_trace.trace_moe_small`` (width=512,
+        # mlp_dim=2048, depth=18) but a single dense FFN (num_local_experts=1).
+        return Config(
+            width=512,
+            depth=18,
+            mlp_dim=2048,
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,
