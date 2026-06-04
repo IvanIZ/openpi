@@ -10,8 +10,8 @@
 #   FSDP=4 bash scripts/smoke_run.sh trace_vla_moe
 #
 # train.py always saves a (~50 GB full-FT) checkpoint at the final step (to the default
-# ./checkpoints/<config>/smoke), and the group disk quota is tight (check with `quota -s`, not
-# `df`), so remove each run's checkpoint afterward and don't run many heavy smokes at once:
+# ./checkpoints/<config>/smoke), so remove each run's checkpoint afterward and
+# don't run many heavy smokes at once:
 #   rm -rf checkpoints/<config>/smoke
 set -euo pipefail
 
