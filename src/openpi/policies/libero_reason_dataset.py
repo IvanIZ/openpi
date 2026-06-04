@@ -42,10 +42,6 @@ def pad_skill_horizon_actions(actions: np.ndarray, action_horizon: int) -> np.nd
 
 def _resolve_dataset_root(repo_id: str, reasoning_json_path: str | None) -> str | None:
     """Resolve the dataset root path for loading.
-
-    yilin-wu/libero-100 (and similar) are often downloaded via huggingface-cli to the
-    HF hub cache, not ~/.cache/lerobot. Use scan_cache_dir to find the actual path.
-    Also try the dirname of reasoning_json_path if provided.
     """
     candidates = []
     if reasoning_json_path is not None:

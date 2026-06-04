@@ -11,10 +11,6 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 def _resolve_dataset_root(repo_id: str, repo_path: str | None) -> str | None:
     """Resolve the dataset root path for loading.
-
-    yilin-wu/libero-100 (and similar) are often downloaded via huggingface-cli to the
-    HF hub cache, not ~/.cache/lerobot. Use scan_cache_dir to find the actual path.
-    Also try the repo_path if provided.
     """
     candidates = []
     if repo_path is not None:
@@ -45,9 +41,6 @@ def _resolve_dataset_root(repo_id: str, repo_path: str | None) -> str | None:
 
 class CalvinDataset(LeRobotDataset):
     def __init__(self, data_config, action_horizon: int):
-        # Resolve root from HF cache or reasoning_json_path. yilin-wu/libero-100 has no
-        # version tags on HF, so we must load from local. Use revision="main" as fallback
-        # to avoid get_safe_version when pulling meta/.
         root = _resolve_dataset_root(
             data_config.repo_id, data_config.repo_path
         )
