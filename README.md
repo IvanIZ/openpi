@@ -55,7 +55,9 @@ cd data
 hf download --repo-type dataset --local-dir libero-r-datasets --include libero-100-r/* nvidia/libero-r-datasets
 # Fix paths to match what is expected by train scripts
 mv libero-r-datasets/libero-100-r libero-100
+
 # Move trace annotation file into the folder
+unzip skill_target_traces.zip
 cp skill_target_traces.json libero-100/
 ```
 
@@ -80,6 +82,67 @@ python scripts/compute_norm_stats.py --config-name trace_vla_moe
 # For additional flags, see scripts/smoke_run.sh
 python scripts/train.py trace_vla_moe --exp-name=test --overwrite
 ```
+
+## Data Annotation Format
+
+Metadata fields are stripped out for clarity. Our annotations have some extra information about the annotation procedure itself.
+```json
+{
+  # Each episode is an entry in the top-level dictionary
+  "0": {
+    "episode_index": 0,
+    "task_index": 0,
+    "instruction": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+    "num_steps": 292,
+    "fps": 10,
+    "plan": "1. PICKUP_FROM(white mug, table) 2. PLACE_ON(white mug, left plate) 3. PICKUP_FROM(yellow and white mug, table) 4. PLACE_ON(yellow and white mug, right plate)",
+    "segments": [   # One entry for each skill
+      {
+        "start_step": 0,
+        "end_step": 115,
+        "skill": "PICKUP_FROM(white mug, table)"
+      },
+      {
+        "start_step": 115,
+        "end_step": 165,
+        "skill": "PLACE_ON(white mug, left plate)"
+      },
+      {
+        "start_step": 165,
+        "end_step": 245,
+        "skill": "PICKUP_FROM(yellow and white mug, table)"
+      },
+      {
+        "start_step": 245,
+        "end_step": 292,
+        "skill": "PLACE_ON(yellow and white mug, right plate)"
+      }
+    ],
+    "target_traces": [  # One trace for each skill.
+      {
+        "skill_index": 0,
+        "skill": "PICKUP_FROM(white mug, table)",
+        "start_step": 0,
+        "end_step": 115,
+        "semantic_target": {
+          "label": "semantic_target",
+          "point": [
+            175,
+            135
+          ]
+        },
+        "end_effector_trace": {
+          "trace": [ <list of 2D points in image space, rounded to pixels> ]
+          "raw_trace": [ <list of 2D points in image space> ]
+        },
+      },
+      <more traces>
+    ]
+  },
+  <more episodes>
+}
+```
+
 
 ## Inference
 
@@ -119,8 +182,6 @@ def _make_obs_dict(task_prompt: str, plan_text: str, skill_idx: int, skill_text:
     ``with_overlay=False`` is the planning-mode obs fed to ``sample_trace``;
     ``with_overlay=True`` is the execution-mode obs fed to ``predict_completion`` / ``infer``.
     """
-    base_seed = 1000 + skill_idx
-    rng = np.random.default_rng(base_seed)
     obs = {
         "observation/image": overhead_image,
         "observation/wrist_image": wrist_image,
