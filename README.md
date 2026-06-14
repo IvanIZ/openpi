@@ -52,7 +52,7 @@ Our train scripts expect it to be placed in the `data` folder as a subfolder of 
 ```bash
 cd data
 # Download just the libero-100 dataset
-hf download --repo-type dataset --local-dir libero-r-datasets --include libero-100-r/* nvidia/libero-r-datasets
+hf download --repo-type dataset --local-dir libero-r-datasets --include libero-100-r/* -- nvidia/libero-r-datasets
 # Fix paths to match what is expected by train scripts
 mv libero-r-datasets/libero-100-r libero-100
 
