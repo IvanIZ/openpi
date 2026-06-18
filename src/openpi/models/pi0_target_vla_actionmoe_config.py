@@ -51,11 +51,11 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+from openpi.models import pi0_config as _pi0_config
 from openpi.models import target_observation as _target_obs
 import openpi.models.gemmoe as _gemmoe
 import openpi.models.gemmoe_trace as _gemmoe_trace
 from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0_target_vla_actionmoe import Pi0TargetVLAActionMoe
@@ -89,6 +89,15 @@ class Pi0TargetVLAActionMoeConfig(_model.BaseModelConfig):
     # Always pi05-style (state can live in the prompt via the tokenizer, time via adaRMS).
     pi05: bool = True
     discrete_state_input: bool = False  # match AtomicVLA / TraceVLA on libero
+
+    # TODO: support flag in pi0_target_vla_actionmoe.py
+    # Original camera frame (height, width) before ``resize_with_pad`` letterboxes it
+    # to the 224x224 model input. Only used by the train-time geometric augmentation in
+    # ``preprocess_trace_observation`` to keep the image-space trace/keypoint targets
+    # aligned with the letterboxed content. ``None`` (default) = square source / no
+    # letterbox, i.e. the LIBERO behaviour. Set to e.g. ``(480, 640)`` for the
+    # physical-robot table-tasks camera.
+    image_source_hw: tuple[int, int] | None = None
 
     # Number of skill-specific experts in the action MoE (and the completion head).
     # Must match ``num_local_experts`` of ``action_expert_variant``. Pinned to 5
@@ -166,23 +175,6 @@ class Pi0TargetVLAActionMoeConfig(_model.BaseModelConfig):
 
           - For ``target_vla_actionmoe`` (full FT everywhere): no freeze.
         """
-        filters = []
-        has_lora = False
-
-        all_llm = nnx_utils.PathRegex(".*llm.*")
-        action_expert_subtree = nnx_utils.PathRegex(".*llm.*(_1).*")
-
-        if "lora" in self.paligemma_variant:
-            # Freeze stream 0 (paligemma) but leave the action expert (stream 1)
-            # fully trainable.
-            filters.append(all_llm)
-            filters.append(nnx.Not(action_expert_subtree))
-            has_lora = True
-
-        if has_lora:
-            # Keep LoRA adapters trainable inside the frozen subtree.
-            filters.append(nnx.Not(nnx_utils.PathRegex(".*lora.*")))
-
-        if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
+        return _pi0_config.llm_freeze_filter(
+            self.paligemma_variant, self.action_expert_variant, expert_suffixes=("_1",)
+        )
