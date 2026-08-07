@@ -193,6 +193,47 @@ class LiberoTargetDataConfig(DataConfig):
     action_down_sample_steps: int = 1
 
 
+@dataclasses.dataclass(frozen=True)
+class LiberoLoHoDataConfig(DataConfig):
+    """Extended DataConfig for the LoHo-Manip executor (trace-conditioned pi05).
+
+    Reproduction of the LoHo-Manip (arXiv 2604.21924) low-level executor on
+    LIBERO — see ``~/workspace/mujoco_test/LoHo-Manip_setup.md`` (D7/D8).
+    Consumed by :class:`openpi.policies.libero_loho_dataset.LiberoLoHoDataset`,
+    which renders the ground-truth current-subtask EE trace directly into the
+    base image and prompts with the current subtask text only.
+
+    Compared to :class:`LiberoTraceDataConfig`: same annotation files, same
+    trace resampling (20 waypoints, arc-length) and overlay rendering style,
+    same scene/overlay dropout + trace perturbation (D8 deviation kept for
+    robustness parity with trace_vla_moe), but NO anchor-age augmentation
+    (``h_train_max`` intentionally absent — traces are rendered fresh from the
+    sample timestep, matching the paper's unspecified/none stance).
+    """
+
+    seed: int = 42
+    skill_annotations_path: str = ""
+    trace_annotations_path: str = ""
+    use_wrist_image: bool = True
+    is_computing_norm_stats: bool = False
+    action_down_sample_steps: int = 1
+
+    # Trace waypoint interface — identical to trace_vla (D9: N=20 shared).
+    trace_horizon: int = 20
+    trace_resample_method: str = "arc_length"
+
+    # Augmentations (D8): scene dropout / overlay (trace) dropout / perturbation.
+    scene_dropout_rate: float = 0.15
+    overlay_dropout_rate: float = 0.10
+    trace_perturb_max_sigma: float = 0.03
+    trace_perturb_num_freqs: int = 3
+
+    # Overlay rendering — identical style to trace_vla.
+    overlay_color: tuple[int, int, int] = (0, 255, 255)
+    overlay_thickness: int = 2
+    overlay_endpoint_radius: float = 2.5
+
+
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         """Create a group."""
@@ -766,6 +807,47 @@ class LeRobotTraceVLAMoeDataConfig(DataConfigFactory):
                 _transforms.PadStatesAndActions(model_config.action_dim),
             ],
         )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        return dataclasses.replace(
+            base,
+            repack_transforms=_transforms.Group(),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLoHoPi05DataConfig(DataConfigFactory):
+    """Data factory for the LoHo-Manip executor: a stock pi05 policy trained on
+    trace-overlaid LIBERO samples (see ``LoHo-Manip_setup.md`` D7/D8).
+
+    The dataset (:class:`openpi.policies.libero_loho_dataset.LiberoLoHoDataset`)
+    already emits standard pi05 keys (``observation/image`` with the trace
+    rendered in, ``observation/wrist_image``, ``observation/state``, ``actions``,
+    ``prompt`` = current subtask text), so the transform stack is entirely
+    stock: :class:`libero_policy.LiberoInputs` + :class:`ModelTransformFactory`
+    (resize 224, PaliGemma tokenize, pad to 32). No repack transforms;
+    ``prompt_from_task`` must stay False — the dataset sets the subtask prompt
+    itself and ``PromptFromLeRobotTask`` would overwrite it.
+    """
+
+    base_config: tyro.conf.Suppress[LiberoLoHoDataConfig | None] = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not isinstance(model_config, pi0_config.Pi0Config) or not model_config.pi05:
+            raise TypeError(
+                "LeRobotLoHoPi05DataConfig expects a Pi0Config with pi05=True, "
+                f"got {type(model_config).__name__}"
+            )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
 
         base = self.create_base_config(assets_dirs, model_config)
         return dataclasses.replace(
@@ -1351,6 +1433,34 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=1_000,
     ),
+    TrainConfig(
+        name="pi05_real_full_ft",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="n5zhong/table_tasks",
+            base_config=DataConfig(
+                repo_path=REPO_ROOT/"data/table_tasks",
+                prompt_from_task=True
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
     # Libero 100 (libero_10 + libero_90), yilin wu edition
     TrainConfig(
         name="pi05_libero_100",
@@ -1376,6 +1486,42 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=100_000,        # match AtomicVLA
+        keep_period=10_000,
+    ),
+    #
+    # LoHo-Manip executor: stock pi05 conditioned on the rendered subtask trace
+    # (+ subtask-text prompt). Reproduction of arXiv 2604.21924's low-level VLA;
+    # design + hyperparameters per ~/workspace/mujoco_test/LoHo-Manip_setup.md
+    # (D2/D7/D8). Train with the standard scripts/train.py:
+    #   python pace/openpi/scripts/train.py loho_pi05 --exp-name loho_pi05 \
+    #     --checkpoint-base-dir /work/hdd/bhit/zhong2/checkpoints
+    # Norm stats are reused (file copy) from trace_vla_moe_no_perturb — same
+    # 8-dim state / 7-dim subtask-clipped actions over the same episodes (D7.4).
+    #
+    TrainConfig(
+        name="loho_pi05",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotLoHoPi05DataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoLoHoDataConfig(
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
         keep_period=10_000,
     ),
     #
@@ -2370,7 +2516,7 @@ _CONFIGS = [
         data=LeRobotTraceVLAMoeDataConfig(
             repo_id="yilin-wu/libero-100",
             base_config=LiberoTraceDataConfig(
-                repo_path=str(REPO_ROOT / "data/libero-100"),
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
                 prompt_from_task=True,
                 skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
                 trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
@@ -2390,6 +2536,196 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=120_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    # ------------------------------------------------------------------
+    # Rebuttal augmentation ablations (leave-one-out + all-off).
+    # Identical to trace_vla_moe except for the disabled augmentation(s) and
+    # num_train_steps=100_000 (the paper's stated training length; keep_period
+    # retains the 50k checkpoint for comparison against the headline eval).
+    # The LR schedule is untouched (decay_steps=1e6), so every step follows
+    # the same LR trajectory as trace_vla_moe.
+    # ------------------------------------------------------------------
+    TrainConfig(
+        name="trace_vla_moe_no_scene_drop",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_moe_config", fromlist=["Pi0TraceVLAMoeConfig"]
+        ).Pi0TraceVLAMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="trace_moe_small",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLAMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+                scene_dropout_rate=0.0,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_moe_no_trace_drop",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_moe_config", fromlist=["Pi0TraceVLAMoeConfig"]
+        ).Pi0TraceVLAMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="trace_moe_small",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLAMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+                overlay_dropout_rate=0.0,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_moe_no_perturb",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_moe_config", fromlist=["Pi0TraceVLAMoeConfig"]
+        ).Pi0TraceVLAMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="trace_moe_small",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLAMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+                trace_perturb_max_sigma=0.0,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
+        save_interval=5_000,
+        keep_period=10_000,
+        log_interval=100,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="trace_vla_moe_no_aug",
+        model=__import__(
+            "openpi.models.pi0_trace_vla_moe_config", fromlist=["Pi0TraceVLAMoeConfig"]
+        ).Pi0TraceVLAMoeConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="trace_moe_gemma_300m",
+            trace_expert_variant="trace_moe_small",
+            action_horizon=10,
+            pi05=True,
+            discrete_state_input=False,
+            max_token_len=200,
+            trace_horizon=20,
+            num_action_experts=5,
+            num_trace_experts=5,
+        ),
+        data=LeRobotTraceVLAMoeDataConfig(
+            repo_id="yilin-wu/libero-100",
+            base_config=LiberoTraceDataConfig(
+                repo_path="/work/nvme/bgtb/zhong2/.cache/huggingface/hub/datasets--yilin-wu--libero-100/snapshots/1384872f07707d6aa361588292068eba7698facd",
+                prompt_from_task=True,
+                skill_annotations_path=str(REPO_ROOT / "data/libero-100/skill_annotations.json"),
+                trace_annotations_path=str(REPO_ROOT / "data/libero-100/skill_target_traces.json"),
+                use_wrist_image=True,
+                is_computing_norm_stats=False,
+                scene_dropout_rate=0.0,
+                overlay_dropout_rate=0.0,
+                trace_perturb_max_sigma=0.0,
+            ),
+        ),
+        assets_base_dir=str(REPO_ROOT / "assets"),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=100_000,
         save_interval=5_000,
         keep_period=10_000,
         log_interval=100,

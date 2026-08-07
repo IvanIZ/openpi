@@ -82,12 +82,18 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
     ckpt_dir = config.checkpoint_dir
     if not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
-    if resuming:
-        run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
+    id_path = ckpt_dir / "wandb_id.txt"
+    if resuming and id_path.exists():
+        run_id = id_path.read_text().strip()
         wandb.init(id=run_id, resume="must", project=config.project_name)
     else:
+        if resuming:
+            # Resuming model training, but no W&B run id is recorded (e.g. the checkpoint
+            # dir was re-created or the checkpoint copied in without wandb_id.txt). Start a
+            # fresh W&B run instead of crashing, and persist its id for future resumes.
+            logging.info(f"Resuming training but {id_path} is missing; starting a new W&B run.")
         wandb.init(name=config.exp_name, config=dataclasses.asdict(config), project=config.project_name)
-        (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+        id_path.write_text(wandb.run.id)
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 

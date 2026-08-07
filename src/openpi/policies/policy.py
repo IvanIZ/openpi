@@ -883,6 +883,37 @@ class TraceVLAPolicy(BasePolicy):
         trace = self._sample_trace(plan_rng, observation, num_steps=num_steps)
         return np.asarray(trace[0])
 
+    def sample_trace_batched(self, obs: dict, batch_size: int = 1, *, num_steps: int = 10) -> np.ndarray:
+        """Sample ``batch_size`` independent traces sharing one observation.
+
+        The underlying flow-matching ODE is deterministic given the initial Gaussian
+        noise; this method tiles the obs to batch axis ``batch_size`` so each element
+        gets its own ``jax.random.normal`` draw inside ``model.sample_trace``, yielding
+        ``batch_size`` distinct traces from one call. Inpainting clamps still pin row
+        0 to ``current_ee_xy`` and (when ``append_target_anchor``) the appended row to
+        ``semantic_target_xy``, so the *returned* traces all share the same starting
+        waypoint but their middle and tail waypoints vary across the batch.
+
+        Returns a ``(batch_size, N, 2)`` numpy array. With ``batch_size=1`` this is
+        equivalent to ``sample_trace(obs)[None, ...]`` modulo the leading axis.
+        """
+        from openpi.models import trace_observation as _trace_obs  # local to avoid cycles
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+
+        def _expand(x):
+            a = jnp.asarray(x)
+            # (..) -> (batch_size, ..) via singleton broadcast.
+            return jnp.broadcast_to(a[jnp.newaxis, ...], (batch_size,) + a.shape)
+
+        inputs = jax.tree.map(_expand, inputs)
+        observation = _trace_obs.TraceObservation.from_dict(inputs)
+        self._rng, plan_rng = jax.random.split(self._rng)
+        traces = self._sample_trace(plan_rng, observation, num_steps=num_steps)
+        return np.asarray(traces)
+
     def predict_completion(self, obs: dict) -> np.ndarray:
         """Standalone completion-progress query (no action sampling).
 
@@ -892,6 +923,89 @@ class TraceVLAPolicy(BasePolicy):
         """
         if self._predict_completion is None:
             raise RuntimeError("Underlying model does not expose `predict_completion`.")
+        _inputs, observation = self._prepare_inputs(obs)
+        self._rng, query_rng = jax.random.split(self._rng)
+        progress = self._predict_completion(query_rng, observation)
+        return np.asarray(progress[0])
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
+
+class TargetVLAPolicy(BasePolicy):
+    """Inference policy for trace-free ``TargetVLA`` models.
+
+    This mirrors :class:`TraceVLAPolicy`'s execution/completion endpoints while
+    deliberately omitting the planning endpoint: TargetVLA has no trace stream
+    and therefore no ``sample_trace`` method or overlay-image input.
+    """
+
+    def __init__(
+        self,
+        model: _model.BaseModel,
+        *,
+        rng: at.KeyArrayLike | None = None,
+        transforms: Sequence[_transforms.DataTransformFn] = (),
+        output_transforms: Sequence[_transforms.DataTransformFn] = (),
+        sample_kwargs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        for method_name in ("sample_actions_and_completion", "predict_completion"):
+            if not hasattr(model, method_name):
+                raise ValueError(
+                    f"TargetVLAPolicy requires model.{method_name}(); the model passed "
+                    f"in does not expose it. Use a TargetVLA-derived model."
+                )
+
+        self._model = model
+        self._sample_actions_and_completion = nnx_utils.module_jit(model.sample_actions_and_completion)
+        self._predict_completion = nnx_utils.module_jit(model.predict_completion)
+
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._sample_kwargs = sample_kwargs or {}
+        self._metadata = metadata or {}
+        self._rng = jax.random.key(0) if rng is None else rng
+
+    def _prepare_inputs(self, obs: dict) -> tuple[dict, "_model.Observation"]:
+        """Apply input transforms, batchify, and build a TargetObservation."""
+        from openpi.models import target_observation as _target_obs  # local import to avoid cycles
+
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        observation = _target_obs.TargetObservation.from_dict(inputs)
+        return inputs, observation
+
+    @override
+    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        inputs, observation = self._prepare_inputs(obs)
+        self._rng, sample_rng = jax.random.split(self._rng)
+
+        sample_kwargs = dict(self._sample_kwargs)
+        if noise is not None:
+            n = jnp.asarray(noise)
+            if n.ndim == 2:
+                n = n[None, ...]
+            sample_kwargs["noise"] = n
+
+        start_time = time.monotonic()
+        actions, progress = self._sample_actions_and_completion(sample_rng, observation, **sample_kwargs)
+        model_time = time.monotonic() - start_time
+
+        outputs = {
+            "state": inputs["state"],
+            "actions": actions,
+            "progress": progress,
+        }
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {"infer_ms": model_time * 1000.0}
+        return outputs
+
+    def predict_completion(self, obs: dict) -> np.ndarray:
+        """Standalone completion-progress query (no action sampling)."""
         _inputs, observation = self._prepare_inputs(obs)
         self._rng, query_rng = jax.random.split(self._rng)
         progress = self._predict_completion(query_rng, observation)

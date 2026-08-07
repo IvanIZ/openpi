@@ -352,3 +352,62 @@ def create_trained_trace_vla_policy(
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
     )
+
+
+def create_trained_target_vla_policy(
+    train_config: _config.TrainConfig,
+    checkpoint_dir: pathlib.Path | str,
+    *,
+    repack_transforms: transforms.Group | None = None,
+    sample_kwargs: dict[str, Any] | None = None,
+    default_prompt: str | None = None,
+    norm_stats: dict[str, transforms.NormStats] | None = None,
+) -> _policy.TargetVLAPolicy:
+    """Create a :class:`TargetVLAPolicy` from a trained TargetVLA checkpoint.
+
+    TargetVLA is the trace-free ablation of TraceVLA: it exposes action sampling
+    plus completion prediction, but no trace sampling/planning endpoint.
+    """
+    repack_transforms = repack_transforms or transforms.Group()
+    checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+
+    weight_path = os.path.join(checkpoint_dir, "model.safetensors")
+    if os.path.exists(weight_path):
+        raise ValueError(
+            "create_trained_target_vla_policy only supports JAX checkpoints with params/. "
+            "Found model.safetensors instead."
+        )
+
+    logging.info("Loading TargetVLA model...")
+    model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+    for method_name in ("sample_actions_and_completion", "predict_completion"):
+        if not hasattr(model, method_name):
+            raise ValueError(
+                f"Model loaded from {checkpoint_dir} is missing `{method_name}`; "
+                "create_trained_target_vla_policy requires a TargetVLA model."
+            )
+
+    data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    if norm_stats is None:
+        if data_config.asset_id is None:
+            raise ValueError("Asset id is required to load norm stats.")
+        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+
+    return _policy.TargetVLAPolicy(
+        model,
+        transforms=[
+            *repack_transforms.inputs,
+            transforms.InjectDefaultPrompt(default_prompt),
+            *data_config.data_transforms.inputs,
+            transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.model_transforms.inputs,
+        ],
+        output_transforms=[
+            *data_config.model_transforms.outputs,
+            transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.data_transforms.outputs,
+            *repack_transforms.outputs,
+        ],
+        sample_kwargs=sample_kwargs,
+        metadata=train_config.policy_metadata,
+    )

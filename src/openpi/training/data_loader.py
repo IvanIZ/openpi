@@ -153,6 +153,12 @@ def create_torch_dataset(
         from openpi.policies.libero_trace_dataset import LiberoTraceDataset
         return LiberoTraceDataset(data_config, action_horizon)
 
+    if isinstance(data_config, _config.LiberoLoHoDataConfig):
+        # LoHo-Manip executor (trace-conditioned pi05). Used by the standard
+        # scripts/train.py path and by compute_norm_stats.py.
+        from openpi.policies.libero_loho_dataset import LiberoLoHoDataset
+        return LiberoLoHoDataset(data_config, action_horizon)
+
     if isinstance(data_config, _config.LiberoTargetDataConfig):
         # Trace-free counterpart of LiberoTraceDataConfig. Used by the
         # ``train_target_vla_actionmoe.py`` training script (which imports the
